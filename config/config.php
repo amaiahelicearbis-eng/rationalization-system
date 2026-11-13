@@ -6,10 +6,10 @@ return [
     'app_name' => 'Rationalization System',
     'timezone' => 'Asia/Manila',
     'db' => [
-        'host' => 'localhost',
+        'host' => '192.168.23.64',
         'database' => 'DB_DISP1',
         'username' => 'sa',
-        'password' => 'Abc12#',
+        'password' => 'Nbc12#',
     ],
 
     'allowed_csv_roots' => [
