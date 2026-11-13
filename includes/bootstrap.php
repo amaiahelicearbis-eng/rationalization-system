@@ -308,9 +308,17 @@ function validate_csv_path(string $path): string {
     }
     $real = realpath($path);
     if ($real === false || !is_file($real)) throw new RuntimeException('CSV file not found. Select the file again from the browser.');
-    if (!is_readable($real)) throw new RuntimeException('PHP cannot read this file.');
     if (!path_is_allowed($real)) throw new RuntimeException('This file is outside the allowed CSV folders.');
+    if (!csv_file_is_readable($real)) throw new RuntimeException('PHP cannot read this file.');
     return $real;
+}
+function csv_file_is_readable(string $path): bool {
+    if (is_readable($path)) return true;
+    // Windows may report false for NAS share ACLs even when an actual read works.
+    $stream = @fopen($path, 'rb');
+    if ($stream === false) return false;
+    fclose($stream);
+    return true;
 }
 function csv_source_metadata(string $path): array {
     $path = trim($path);
@@ -321,7 +329,7 @@ function csv_source_metadata(string $path): array {
         return ['exists' => $exists, 'mtime' => (int)$info['modified'], 'size' => (int)$info['size']];
     }
     clearstatcache(true, $path);
-    $exists = is_file($path) && is_readable($path) && path_is_allowed($path);
+    $exists = is_file($path) && path_is_allowed($path) && csv_file_is_readable($path);
     return ['exists' => $exists, 'mtime' => $exists ? (int)(filemtime($path) ?: 0) : 0, 'size' => $exists ? (int)(filesize($path) ?: 0) : 0];
 }
 function csv_path_basename(string $path): string {
@@ -394,3 +402,5 @@ function save_process_path(string $key, string $path): void {
     $after = process_record($key);
     audit_log($before && $before['link'] ? 'UPDATE' : 'CREATE', 'process_csv_source', (int)($after['id'] ?? 0), 'CSV source link changed for ' . (PROCESS_LIST[$key]['label'] ?? $key), $before, $after);
 }
+
+require_once __DIR__ . '/master-data.php';

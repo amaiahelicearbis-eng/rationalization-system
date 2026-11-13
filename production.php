@@ -57,12 +57,7 @@ if ($key !== 'cut') {
     $kCsvModels = [];
     $kCsvError = '';
     try {
-        $kSourceRecord = process_record($key);
-        $kCsvPath = trim((string)($kSourceRecord['link'] ?? ''));
-        if ($kCsvPath === '') {
-            throw new RuntimeException('No CSV source is configured for this process. Open Model Data and select its shared CSV file first.');
-        }
-        $kCsv = read_csv_file($kCsvPath);
+        $kCsv = read_process_master_data($key);
         $kNorm = static fn($v) => strtolower(preg_replace('/[^a-z0-9]/i', '', (string)$v));
         $kModelCol = $kPartCol = null;
         foreach ($kCsv['headers'] as $i => $header) {
@@ -549,9 +544,8 @@ if ($key !== 'cut') {
 $label=PROCESS_LIST[$key]['label'];
 $error=$notice=''; $rows=[]; $models=[]; $machines=[]; $edit=null; $machineSelection=''; $cutKeyColumns=[];
 try {
- $rec=process_record($key); $path=trim((string)($rec['link']??''));
- if($path!=='') {
-  $csv=read_csv_file($path);
+ {
+  $csv=read_process_master_data($key);
   $headers=$csv['headers'];
   $norm=fn($v)=>strtolower(preg_replace('/[^a-z0-9]/i','',(string)$v));
   $modelNameCol=$partNameCol=$branchCol=$barCodeCol=null;

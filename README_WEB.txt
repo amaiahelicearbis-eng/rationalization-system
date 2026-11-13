@@ -15,7 +15,7 @@ INSTALLATION
 4. Run sql/web_migration_DB_DISP1.sql in SSMS. This creates only dbo.web_production_plan and dbo.web_monthly_plan. It does not drop or alter legacy tables.
 5. Run setup.php once. It creates dbo.users, dbo.process_csv_sources and dbo.change_history in DB_DISP1 if missing. Existing user accounts in the separate rationalization-system database are not migrated automatically.
 6. Open login.php. Initial admin is admin/admin only if setup seeded it; change the password immediately.
-7. Confirm Synology private configuration and permissions remain as in your working current system.
+7. Automatic master data sources are configured in config/master-data.php. By default PHP reads \\192.168.20.11\BarcodeTagPrint\MASTER DATA directly using the Apache Windows account. That account needs read permission to the share; mapped drive O: is not required. File Station is optional: use a synology: root and a private Synology configuration when Windows share access is unavailable.
 
 IMPORTANT DATA NOTES
 - Existing CSV functionality was retained. Daily production page uses the configured CSV for model/part-number suggestions.
@@ -26,6 +26,16 @@ IMPORTANT DATA NOTES
 
 REQUIREMENTS
 PHP 8.1+, PDO_SQLSRV, SQL Server, cURL for Synology API access.
+
+AUTOMATIC MASTER DATA
+- Cut & Crimp: engineering CNC (003) plus standard CNC (000).
+- Finished Goods: QC (002).
+- Saki, Ato, Contact SW, MR-SW, Hot Melt and Assembly: engineering SUB-ASSY (003), DOOR-MIRROR and standard SUB-ASSY (001).
+- Kitting: all six sources above.
+- Only the newest matching CSV in each configured folder is used. Backup and DO NOT USE subfolders are never scanned.
+- ModelName + Branch + Barcode identifies a record, ignoring case and surrounding spaces. Later configured sources win on duplicates; distinct branches/barcodes remain separate. Without a usable identity, only equal complete rows are removed.
+- Model Data and production suggestions use the same sources. The data explorer checks for changes every 10 seconds, including source filename changes. The old manual source-selection panel has been removed.
+- Run php tests/master-data.php to check discovery, merging, duplicate removal and refresh signatures without connecting to the NAS or SQL Server.
 
 
 UNIFIED LAYOUT UPDATE
