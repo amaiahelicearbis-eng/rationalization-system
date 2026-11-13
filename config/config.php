@@ -6,7 +6,7 @@ return [
     'app_name' => 'Rationalization System',
     'timezone' => 'Asia/Manila',
     'db' => [
-        'host' => '192.168.23.64',
+        'host' => '192.168.20.230',
         'database' => 'DB_DISP1',
         'username' => 'sa',
         'password' => 'Nbc12#',
