@@ -70,7 +70,56 @@ function require_process_access(string $key): void {
     require_login();
     if (!user_can_access_process($key)) {
         http_response_code(403);
-        exit('You do not have access to this process.');
+        $processLabel = PROCESS_LIST[$key]['label'] ?? 'this process';
+        $returnUrl = 'production.php';
+        $allowed = accessible_processes();
+        if ($allowed) {
+            $firstAllowed = (string)array_key_first($allowed);
+            $returnUrl .= '?process=' . rawurlencode($firstAllowed);
+        }
+        $safeLabel = h($processLabel);
+        $safeReturnUrl = h($returnUrl);
+        exit(<<<HTML
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Access Restricted</title>
+<style>
+    *{box-sizing:border-box}
+    body{margin:0;min-height:100vh;font-family:Arial,Helvetica,sans-serif;background:#f3f6f2;color:#263329}
+    .access-overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(20,35,25,.58);backdrop-filter:blur(4px)}
+    .access-modal{position:relative;width:min(440px,100%);padding:32px 30px 28px;text-align:center;background:#fff;border:1px solid #e1e8df;border-radius:18px;box-shadow:0 22px 70px rgba(0,0,0,.24);animation:modalIn .18s ease-out}
+    .access-icon{width:58px;height:58px;margin:0 auto 17px;display:grid;place-items:center;border-radius:50%;background:#fff0ed;color:#c84b3d;font-size:28px;font-weight:700}
+    .access-modal h1{margin:0 0 10px;font-size:21px;line-height:1.3;color:#263329}
+    .access-modal p{margin:0;color:#657269;font-size:14px;line-height:1.65}
+    .access-process{display:inline-block;margin-top:13px;padding:7px 12px;border-radius:8px;background:#f0f4ed;color:#3d5945;font-size:13px;font-weight:700}
+    .access-actions{display:flex;justify-content:center;gap:10px;margin-top:25px}
+    .access-btn{display:inline-flex;align-items:center;justify-content:center;min-height:42px;padding:0 18px;border:0;border-radius:9px;background:#39784b;color:#fff;text-decoration:none;font-size:14px;font-weight:700;cursor:pointer}
+    .access-btn:hover{background:#2f653e}
+    .access-btn.secondary{background:#edf1eb;color:#425248}
+    .access-btn.secondary:hover{background:#e1e8df}
+    @keyframes modalIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}
+    @media(max-width:420px){.access-modal{padding:27px 20px 23px}.access-actions{flex-direction:column}.access-btn{width:100%}}
+</style>
+</head>
+<body>
+<div class="access-overlay" role="presentation">
+    <section class="access-modal" role="dialog" aria-modal="true" aria-labelledby="access-title" aria-describedby="access-message">
+        <div class="access-icon" aria-hidden="true">!</div>
+        <h1 id="access-title">Access Restricted</h1>
+        <p id="access-message">Your account does not have permission to open this production process.</p>
+        <div class="access-process">{$safeLabel}</div>
+        <div class="access-actions">
+            <button class="access-btn secondary" type="button" onclick="if(history.length>1){history.back()}else{location.href='{$safeReturnUrl}'}">Go Back</button>
+            <a class="access-btn" href="{$safeReturnUrl}">Go to My Processes</a>
+        </div>
+    </section>
+</div>
+</body>
+</html>
+HTML);
     }
 }
 function accessible_processes(): array {
