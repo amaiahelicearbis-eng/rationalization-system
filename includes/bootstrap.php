@@ -52,6 +52,35 @@ function audit_log(string $action, string $entityType, ?int $entityId, string $d
     $stmt->execute(['uid'=>$u['id'] ?? null, 'username'=>$u['username'] ?? 'system', 'action'=>$action, 'etype'=>$entityType, 'eid'=>$entityId, 'description'=>$description, 'before_data'=>$before === null ? null : json_encode($before, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES), 'after_data'=>$after === null ? null : json_encode($after, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES), 'ip'=>substr((string)($_SERVER['REMOTE_ADDR'] ?? ''),0,45)]);
 }
 function process_key(): string { $k=(string)($_GET['process'] ?? $_POST['process'] ?? 'cut'); return isset(PROCESS_LIST[$k]) ? $k : 'cut'; }
+
+/** Standard users receive access only to the process keys assigned in dbo.users.user_process.
+ * Legacy value 'subassy' is retained for existing accounts and grants both Saki and Ato.
+ */
+function user_process_scopes(): array {
+    $raw = (string)(current_user()['user_process'] ?? '');
+    $values = array_filter(array_map(static fn($v) => strtolower(trim($v)), preg_split('/[,;|]+/', $raw) ?: []));
+    if (in_array('subassy', $values, true)) { $values[] = 'saki'; $values[] = 'ato'; }
+    return array_values(array_unique($values));
+}
+function user_can_access_process(string $key): bool {
+    if (is_admin()) return true;
+    return isset(PROCESS_LIST[$key]) && in_array($key, user_process_scopes(), true);
+}
+function require_process_access(string $key): void {
+    require_login();
+    if (!user_can_access_process($key)) {
+        http_response_code(403);
+        exit('You do not have access to this process.');
+    }
+}
+function accessible_processes(): array {
+    if (is_admin()) return PROCESS_LIST;
+    $allowed = [];
+    foreach (PROCESS_LIST as $key => $process) {
+        if (user_can_access_process($key)) $allowed[$key] = $process;
+    }
+    return $allowed;
+}
 function process_record(string $key): ?array {
     $stmt=db()->prepare('SELECT TOP (1) id, process_key, process, link, updated_by, updated_at FROM dbo.process_csv_sources WHERE process_key=?');
     $stmt->execute([$key]); $r=$stmt->fetch(); return $r ?: null;
@@ -308,9 +337,17 @@ function validate_csv_path(string $path): string {
     }
     $real = realpath($path);
     if ($real === false || !is_file($real)) throw new RuntimeException('CSV file not found. Select the file again from the browser.');
-    if (!is_readable($real)) throw new RuntimeException('PHP cannot read this file.');
     if (!path_is_allowed($real)) throw new RuntimeException('This file is outside the allowed CSV folders.');
+    if (!csv_file_is_readable($real)) throw new RuntimeException('PHP cannot read this file.');
     return $real;
+}
+function csv_file_is_readable(string $path): bool {
+    if (is_readable($path)) return true;
+    // Windows may report false for NAS share ACLs even when an actual read works.
+    $stream = @fopen($path, 'rb');
+    if ($stream === false) return false;
+    fclose($stream);
+    return true;
 }
 function csv_source_metadata(string $path): array {
     $path = trim($path);
@@ -321,7 +358,7 @@ function csv_source_metadata(string $path): array {
         return ['exists' => $exists, 'mtime' => (int)$info['modified'], 'size' => (int)$info['size']];
     }
     clearstatcache(true, $path);
-    $exists = is_file($path) && is_readable($path) && path_is_allowed($path);
+    $exists = is_file($path) && path_is_allowed($path) && csv_file_is_readable($path);
     return ['exists' => $exists, 'mtime' => $exists ? (int)(filemtime($path) ?: 0) : 0, 'size' => $exists ? (int)(filesize($path) ?: 0) : 0];
 }
 function csv_path_basename(string $path): string {
@@ -394,3 +431,5 @@ function save_process_path(string $key, string $path): void {
     $after = process_record($key);
     audit_log($before && $before['link'] ? 'UPDATE' : 'CREATE', 'process_csv_source', (int)($after['id'] ?? 0), 'CSV source link changed for ' . (PROCESS_LIST[$key]['label'] ?? $key), $before, $after);
 }
+
+require_once __DIR__ . '/master-data.php';

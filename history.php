@@ -11,6 +11,14 @@ $limit = 50;
 $where = ["action NOT IN ('LOGIN', 'LOGOUT')"];
 $params = [];
 
+// Administrators can review the complete audit trail. Standard users must not
+// see user-account management events (create, update, delete, activate, deactivate).
+$role = strtolower(trim((string)(current_user()['role'] ?? 'user')));
+$isAdministrator = in_array($role, ['admin', 'administrator'], true);
+if (!$isAdministrator) {
+    $where[] = "LOWER(LTRIM(RTRIM(entity_type))) NOT IN ('user', 'users', 'account', 'accounts')";
+}
+
 if ($q !== '') {
     $where[] = '(username LIKE ? OR description LIKE ? OR entity_type LIKE ?)';
     array_push($params, '%' . $q . '%', '%' . $q . '%', '%' . $q . '%');
