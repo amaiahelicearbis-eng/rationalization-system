@@ -2,6 +2,7 @@
 $pageTitle = $pageTitle ?? 'Rationalization System';
 $activePage = $activePage ?? basename($_SERVER['PHP_SELF'], '.php');
 $currentProcess = $currentProcess ?? (function_exists('process_key') ? process_key() : 'cut');
+if (!user_can_access_process($currentProcess)) { $availableProcesses = accessible_processes(); $currentProcess = $availableProcesses ? (string)array_key_first($availableProcesses) : 'cut'; }
 $showProcesses = in_array($activePage, ['production','modeldata'], true);
 ?>
 
@@ -30,12 +31,12 @@ $showProcesses = in_array($activePage, ['production','modeldata'], true);
 <a class="brand" href="dashboard.php"><span class="brand-mark">R</span><span><b>RATIONALIZATION</b><small>PRODUCTION SYSTEM</small></span></a>
 <div class="nav-label">WORKSPACE</div><div class="workspace-links">
 <a class="nav-item <?= $activePage==='modeldata'?'active':'' ?>" href="ModelData.php?process=<?=h($currentProcess)?>"><span>▧</span> MASTER DATA</a>
-<a class="nav-item <?= $activePage==='production'?'active':'' ?>" href="production.php?process=<?=h($currentProcess)?>""><span>⚙</span> Production Planning</a>
+<a class="nav-item <?= $activePage==='production'?'active':'' ?>" href="production.php?process=<?=h($currentProcess)?>" ><span>⚙</span> Production Planning</a>
 <a class="nav-item <?= $activePage==='history'?'active':'' ?>" href="history.php"><span>◷</span> Change History</a>
 <?php if(is_admin()): ?><a class="nav-item <?= $activePage==='users'?'active':'' ?>" href="users.php"><span>♙</span> User Management</a><?php endif; ?>
 </div>
 <div class="process-links"><div class="nav-label"><?= $activePage === 'modeldata' ? 'MODEL PROCESSES' : 'PLAN PROCESSES' ?></div>
-<?php foreach(PROCESS_LIST as $k=>$p): ?>
+<?php foreach(accessible_processes() as $k=>$p): ?>
 <a class="nav-item <?= $activePage === ($activePage === 'modeldata' ? 'modeldata' : 'production') && $k === $currentProcess ? 'selected' : '' ?>" href="<?= $activePage === 'modeldata' ? 'ModelData.php' : 'production.php' ?>?process=<?=h($k)?>"><span><?=h($p['icon'])?></span><?=h($p['label'])?></a>
 <?php endforeach; ?>
 </div><div class="sidebar-bottom"><span class="status-dot"></span> <?=h(current_user()['full_name'] ?: current_user()['username'])?><small><?=h(current_user()['role'])?></small></div>

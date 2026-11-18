@@ -16,6 +16,7 @@ try {
                 username NVARCHAR(80) NOT NULL,
                 password_hash NVARCHAR(255) NOT NULL,
                 full_name NVARCHAR(160) NOT NULL,
+                user_process NVARCHAR(200) NOT NULL CONSTRAINT DF_users_user_process DEFAULT N'',
                 role NVARCHAR(10) NOT NULL CONSTRAINT DF_users_role DEFAULT N'user',
                 is_active BIT NOT NULL CONSTRAINT DF_users_is_active DEFAULT 1,
                 created_at DATETIME2(0) NOT NULL CONSTRAINT DF_users_created_at DEFAULT SYSDATETIME(),
@@ -57,6 +58,7 @@ try {
         "IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name=N'IX_change_history_entity' AND object_id=OBJECT_ID(N'dbo.change_history')) CREATE INDEX IX_change_history_entity ON dbo.change_history(entity_type, entity_id)",
     ];
     foreach ($ddl as $statement) $pdo->exec($statement);
+    $pdo->exec("IF COL_LENGTH(N'dbo.users', N'user_process') IS NULL ALTER TABLE dbo.users ADD user_process NVARCHAR(200) NOT NULL CONSTRAINT DF_users_user_process DEFAULT N'' WITH VALUES");
 
     foreach (PROCESS_LIST as $key => $process) {
         $check = $pdo->prepare('SELECT COUNT(*) FROM dbo.process_csv_sources WHERE process_key = ?');
