@@ -3,6 +3,8 @@ declare(strict_types=1);
 $config = require __DIR__ . '/../config/config.php';
 date_default_timezone_set($config['timezone'] ?? 'Asia/Manila');
 if (session_status() !== PHP_SESSION_ACTIVE) {
+    // Keep Rationalization login data separate from the Shuttle application.
+    session_name('RATIONALIZATIONSESSID');
     ini_set('session.use_strict_mode', '1');
     session_start();
 }
