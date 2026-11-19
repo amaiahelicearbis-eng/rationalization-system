@@ -12,6 +12,7 @@ if (empty($_SESSION['csrf'])) $_SESSION['csrf'] = bin2hex(random_bytes(32));
 
 const PROCESS_LIST = [
     'cut' => ['label' => 'Cut & Crimp', 'icon' => '✂', 'hint' => 'CNC code master data'],
+    'cnc_inspection' => ['label' => 'CNC Inspection', 'icon' => '◉', 'hint' => 'CNC Inspection production data'],
     'kitting' => ['label' => 'Kitting', 'icon' => '▦', 'hint' => 'Kitting CSV source'],
     'saki' => ['label' => 'Sub Assy (Saki)', 'icon' => '⚙', 'hint' => 'Saki CSV source'],
     'ato' => ['label' => 'Sub Assy (Ato)', 'icon' => '⚙', 'hint' => 'Ato CSV source'],

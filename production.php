@@ -4,7 +4,7 @@ declare(strict_types=1); require __DIR__.'/includes/bootstrap.php'; require_logi
 
 /** Production import helpers. Requires PhpSpreadsheet from the project's vendor/autoload.php. */
 function production_import_headers(string $process): array {
-    if ($process === 'cut') return ['MODELCD','YOTEI_DATE','MACHINE_NO','DAY_NIGHT','START_TIME','END_TIME','QTY_YOTEI','QTY_JISSEKI'];
+    if (in_array($process, ['cut','cnc_inspection'], true)) return ['MODELCD','DATE','MACHINE_NO','DAY_NIGHT','START_TIME','END_TIME','PLAN'];
     $headers = ['MODELCD','DATE'];
     for ($i=0;$i<24;$i++) $headers[]=$i.':00';
     return $headers;
@@ -17,8 +17,10 @@ function production_import_read_file(array $file): array {
         $fh=fopen($file['tmp_name'],'rb'); if(!$fh) throw new RuntimeException('Unable to read the CSV file.');
         $headers=fgetcsv($fh); if(!$headers){fclose($fh);throw new RuntimeException('The CSV file is empty.');}
         $headers[0]=preg_replace('/^\xEF\xBB\xBF/','',(string)$headers[0]);
-        $rows=[]; while(($line=fgetcsv($fh))!==false){ if(count(array_filter($line,static fn($v)=>trim((string)$v)!==''))===0)continue; $row=[]; foreach($headers as $i=>$h)$row[(string)$h]=$line[$i]??''; $rows[]=$row; }
-        fclose($fh); return $rows;
+        // Ignore trailing empty CSV header cells, but retain any non-empty extra header for validation.
+        while ($headers && trim((string)end($headers)) === '') array_pop($headers);
+        $rows=[]; while(($line=fgetcsv($fh))!==false){ if(count(array_filter($line,static fn($v)=>trim((string)$v)!==''))===0)continue; while ($line && trim((string)end($line)) === '') array_pop($line); $rows[]=$line; }
+        fclose($fh); return ['headers'=>$headers,'rows'=>$rows];
     }
     $autoload=__DIR__.'/vendor/autoload.php';
     if(!is_file($autoload)) throw new RuntimeException('PhpSpreadsheet was not found. Please confirm vendor/autoload.php exists beside production.php.');
@@ -26,21 +28,67 @@ function production_import_read_file(array $file): array {
     if(!class_exists(\PhpOffice\PhpSpreadsheet\IOFactory::class)) throw new RuntimeException('PhpSpreadsheet is missing from the vendor folder.');
     $sheet=\PhpOffice\PhpSpreadsheet\IOFactory::load($file['tmp_name'])->getActiveSheet();
     $data=$sheet->toArray(null,true,true,false); if(!$data)throw new RuntimeException('The Excel file is empty.');
-    $headers=array_map(static fn($v)=>(string)$v,array_shift($data)); $rows=[];
-    foreach($data as $line){if(count(array_filter($line,static fn($v)=>trim((string)$v)!==''))===0)continue;$row=[];foreach($headers as $i=>$h)$row[$h]=$line[$i]??'';$rows[]=$row;}
-    return $rows;
+    $headers=array_shift($data);
+    // PhpSpreadsheet may include formatted-but-empty columns (for example AA after Z).
+    // Remove only trailing blank header cells; real extra headers remain and fail validation.
+    while ($headers && trim((string)end($headers)) === '') array_pop($headers);
+    $rows=[];
+    foreach($data as $line){
+        if(count(array_filter($line,static fn($v)=>trim((string)$v)!==''))===0)continue;
+        // Ignore trailing blank cells, but preserve any populated cells beyond the approved columns.
+        while ($line && trim((string)end($line)) === '') array_pop($line);
+        $rows[]=$line;
+    }
+    return ['headers'=>$headers,'rows'=>$rows];
+}
+function production_import_validate_headers(string $process, array $uploadedHeaders): void {
+    $expected = in_array($process, ['cut','cnc_inspection'], true)
+        ? ['MODELCD','DATE','MACHINE_NO','DAY_NIGHT','START_TIME','END_TIME','PLAN']
+        : array_merge(['MODELCD','DATE'], array_map(static fn($hour)=>$hour.':00', range(0,23)));
+
+    $normalize = static function($value): string {
+        if ($value instanceof DateTimeInterface) return $value->format('G:i');
+        if (is_numeric($value) && (float)$value >= 0 && (float)$value < 1) {
+            $minutes = (int)round((float)$value * 1440);
+            return (string)(int)floor($minutes / 60).':'.str_pad((string)($minutes % 60),2,'0',STR_PAD_LEFT);
+        }
+        $value = trim((string)$value);
+        $value = preg_replace('/^\\s*0+(\\d:)/', '$1', $value);
+        return strtoupper(preg_replace('/\\s+/', '', $value));
+    };
+    $actual = array_map($normalize, $uploadedHeaders);
+    $wanted = array_map($normalize, $expected);
+    $errors = [];
+    if (count($actual) !== count($wanted)) {
+        $errors[] = 'Column count is incorrect. Expected exactly '.count($wanted).' columns, but the uploaded file contains '.count($actual).'.';
+    }
+    $max = max(count($actual), count($wanted));
+    for ($i=0; $i<$max; $i++) {
+        $got = $actual[$i] ?? '[missing]';
+        $need = $wanted[$i] ?? '[no extra column allowed]';
+        if ($got !== $need) {
+            $column = $i + 1;
+            $errors[] = 'Column '.$column.': expected "'.($expected[$i] ?? 'no column').'"; found "'.(isset($uploadedHeaders[$i]) ? (string)$uploadedHeaders[$i] : 'missing').'".';
+        }
+    }
+    if ($errors) {
+        throw new RuntimeException("Wrong import template for ".(in_array($process, ['cut','cnc_inspection'], true) ? ($process === 'cnc_inspection' ? 'CNC Inspection' : 'Cut & Crimp') : 'this production process').". Nothing was imported.\n".implode("\n",$errors));
+    }
 }
 function production_import_records(string $process, string $date, array $file, array $catalog): array {
     global $processTableMap, $processMapKey;
-    $rows=production_import_read_file($file); if(!$rows) throw new RuntimeException('The selected file has no data rows.');
+    $fileData=production_import_read_file($file); production_import_validate_headers($process,$fileData['headers']); foreach($fileData['rows'] as $dataIndex=>$dataLine){ if(count($dataLine)>count($fileData['headers'])) throw new RuntimeException('Wrong import format at data row '.($dataIndex+2).': the row contains more cells than the approved template. Nothing was imported.'); } $rows=[]; foreach($fileData['rows'] as $line){$row=[];foreach($fileData['headers'] as $i=>$header){$row[(string)$header]=$line[$i]??'';}$rows[]=$row;} if(!$rows) throw new RuntimeException('The selected file has no data rows.');
     $norm=static fn($v)=>strtoupper(preg_replace('/[^a-z0-9]/i','',(string)$v));
     $catalogNormalized=[]; foreach($catalog as $catalogCode=>$catalogRow){$catalogNormalized[strtoupper(trim((string)$catalogCode))]=$catalogRow;} $catalog=$catalogNormalized;
-    $table = $process==='cut' ? 'TB_CUTPRESSURE' : ($processTableMap[$processMapKey]['table'] ?? '');
+    $table = in_array($process, ['cut','cnc_inspection'], true) ? ($process === 'cnc_inspection' ? 'TB_CNCINSPECTION' : 'TB_CUTPRESSURE') : ($processTableMap[$processMapKey]['table'] ?? '');
     if($table==='') throw new RuntimeException('No import table is configured for this process.');
     $pdo=db(); $inserted=0; $updated=0; $skipped=0; $errors=[];
     foreach($rows as $lineNo=>$row){
       $r=[]; foreach($row as $k=>$v)$r[$norm($k)]=$v;
       $code=trim((string)($r['MODELCD']??''));
+      // SAMPLE001 is a demonstration row included in the generated import templates.
+      // Ignore it for Cut & Crimp and every hourly production process.
+      if(strtoupper($code)==='SAMPLE001'){ $skipped++; continue; }
       if($code===''){ $skipped++; $errors[]='Row '.($lineNo+2).': Model Code is empty.'; continue; }
       if(!isset($catalog[strtoupper($code)])){ $skipped++; $errors[]=$code.' is not registered'; continue; }
       $model=$catalog[strtoupper($code)];
@@ -52,11 +100,11 @@ function production_import_records(string $process, string $date, array $file, a
         $dt=DateTime::createFromFormat('!Y-m-d',$rowDate) ?: DateTime::createFromFormat('!m/d/Y',$rowDate) ?: DateTime::createFromFormat('!n/j/Y',$rowDate);
         if(!$dt) throw new RuntimeException('Invalid YOTEI_DATE. Use YYYY-MM-DD.');
         $rowDate=$dt->format('Y-m-d');
-        if($process==='cut'){
+        if(in_array($process, ['cut','cnc_inspection'], true)){
           $machine=trim((string)($r['MACHINENO']??''));
           if($machine==='') throw new RuntimeException('For '.$code.', machine number is empty.');
           $machineCheck=$pdo->prepare('SELECT TOP 1 id FROM dbo.machine WHERE Machine=? AND Process=?');
-          $machineCheck->execute([$machine,'cut']);
+          $machineCheck->execute([$machine,$process]);
           if(!$machineCheck->fetchColumn()) throw new RuntimeException('For '.$code.', machine number '.$machine.' is not registered');
           $shiftValue=$r['DAYNIGHT']??$r['SHIFTDAYNIGHT']??$r['SHIFT']??'DAY';
           $shift=strtoupper(trim((string)$shiftValue)); $start=trim((string)($r['STARTTIME']??'00:00')); $end=trim((string)($r['ENDTIME']??'00:00'));
@@ -65,10 +113,8 @@ function production_import_records(string $process, string $date, array $file, a
           [$sh,$sm]=array_map('intval',explode(':',$start));[$eh,$em]=array_map('intval',explode(':',$end));
           $modelName='Model: '.$model['model_code'].'| PartName: '.$model['part_name'].'| Type: '.$model['type'].'| Color: 000'.$model['color'].'| Length: 0'.$model['length'];
           $planRaw=$r['QTY_YOTEI']??$r['PLAN']??'0';
-          $actualRaw=$r['QTY_JISSEKI']??$r['ACTUAL']??'0';
           if(trim((string)$planRaw)==='' || !preg_match('/^\\d+$/',trim((string)$planRaw))) throw new RuntimeException('For '.$code.', PLAN must be a non-negative whole number.');
-          if(trim((string)$actualRaw)==='' || !preg_match('/^\\d+$/',trim((string)$actualRaw))) throw new RuntimeException('For '.$code.', ACTUAL must be a non-negative whole number.');
-          $values=['MODELNAME'=>$modelName,'MACHINE_NO'=>$machine,'DAY_NIGHT'=>in_array($shift,['NIGHT','1'],true)?1:0,'START_TIME_H'=>$sh,'START_TIME_M'=>$sm,'ENDY_TIME_H'=>$eh,'ENDY_TIME_M'=>$em,'END_TIME_H'=>$eh,'END_TIME_M'=>$em,'QTY_YOTEI'=>(int)$planRaw,'QTY_JISSEKI'=>(int)$actualRaw];
+          $values=['MODELNAME'=>$modelName,'MACHINE_NO'=>$machine,'DAY_NIGHT'=>in_array($shift,['NIGHT','1'],true)?1:0,'START_TIME_H'=>$sh,'START_TIME_M'=>$sm,'ENDY_TIME_H'=>$eh,'ENDY_TIME_M'=>$em,'END_TIME_H'=>$eh,'END_TIME_M'=>$em,'QTY_YOTEI'=>(int)$planRaw];
         } else {
           // Hourly process template contains MODELCD, DATE, then 0:00 through 23:00.
           // Update only planned quantities; preserve existing actual quantities.
@@ -92,7 +138,6 @@ function production_import_records(string $process, string $date, array $file, a
           $st=$pdo->prepare("UPDATE dbo.{$table} SET ".implode(',',$sets)." WHERE MODELCD=? AND YOTEI_DATE>=CAST(? AS date) AND YOTEI_DATE<DATEADD(day,1,CAST(? AS date))");$st->execute($params);$rowAction='updated';
         } else {
           $insert=['MODELCD'=>$code,'YOTEI_DATE'=>$rowDate]+$values;
-          if($process!=='cut') for($i=0;$i<24;$i++) $insert['QTY_JISSEKI_'.$i]=0;
           $cols=array_keys($insert);$sql="INSERT INTO dbo.{$table} (".implode(',',array_map(static fn($c)=>'['.$c.']',$cols)).") VALUES (".implode(',',array_fill(0,count($cols),'?')).")";$pdo->prepare($sql)->execute(array_values($insert));$rowAction='inserted';
         }
         $pdo->commit(); if(($rowAction??'')==='updated')$updated++;else $inserted++; $rowAction='';
@@ -102,28 +147,29 @@ function production_import_records(string $process, string $date, array $file, a
     return ['inserted'=>$inserted,'updated'=>$updated,'skipped'=>$skipped,'errors'=>$errors];
 }
 /** Cut & Crimp import entry point: validates the Cut-specific columns and machine/model catalog. */
-function production_import_cut_records(string $date, array $file, array $cutCatalog): array {
-    return production_import_records('cut', $date, $file, $cutCatalog);
+function production_import_cut_records(string $date, array $file, array $cutCatalog, string $process = 'cut'): array {
+    if (!in_array($process, ['cut','cnc_inspection'], true)) throw new InvalidArgumentException('Invalid machine-process import.');
+    return production_import_records($process, $date, $file, $cutCatalog);
 }
 
-/** Hourly-process import entry point: validates the 24-hour plan/actual columns and ModalData catalog. */
+/** Hourly-process import entry point: validates the 24-hour planned quantity columns and ModalData catalog. */
 function production_import_hourly_records(string $process, string $date, array $file, array $modalDataCatalog): array {
-    if ($process === 'cut') {
+    if (in_array($process, ['cut','cnc_inspection'], true)) {
         throw new InvalidArgumentException('Hourly import cannot be used for Cut & Crimp.');
     }
     return production_import_records($process, $date, $file, $modalDataCatalog);
 }
 
 function production_download_sample(string $process, string $date): void {
-    $templateFile = $process === 'cut'
+    $templateFile = in_array($process, ['cut','cnc_inspection'], true)
         ? __DIR__ . '/template/Cut_and_Crimp_Import_Template.xlsx'
-        : __DIR__ . '/template/Kitting_and_Other_Processes_Import_Template.xlsx';
+        : __DIR__ . '/template/Other_Processes_Import_Template.xlsx';
     if (!is_file($templateFile) || !is_readable($templateFile)) {
         throw new RuntimeException('Import template file is missing. Please place the correct Excel template inside the project template folder: ' . basename($templateFile));
     }
-    $downloadName = $process === 'cut'
-        ? 'Cut_and_Crimp_Import_Template.xlsx'
-        : 'Kitting_and_Other_Processes_Import_Template.xlsx';
+    $downloadName = in_array($process, ['cut','cnc_inspection'], true)
+        ? ($process === 'cnc_inspection' ? 'CNC_Inspection_Import_Template.xlsx' : 'Cut_and_Crimp_Import_Template.xlsx')
+        : 'Other_Processes_Import_Template.xlsx';
     if (ob_get_level()) { while (ob_get_level()) ob_end_clean(); }
     header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     header('Content-Disposition: attachment; filename="' . $downloadName . '"');
@@ -134,6 +180,8 @@ function production_download_sample(string $process, string $date): void {
 }
 
 $key=(string)($_GET['process']??$_POST['process']??'cut'); if(!isset(PROCESS_LIST[$key]))$key='cut'; require_process_access($key);
+$isCutProcess = in_array($key, ['cut','cnc_inspection'], true);
+$cutTable = $key === 'cnc_inspection' ? 'TB_CNCINSPECTION' : 'TB_CUTPRESSURE';
 $date=(string)($_GET['date']??$_POST['plan_date']??date('Y-m-d')); if(!preg_match('/^\d{4}-\d{2}-\d{2}$/',$date))$date=date('Y-m-d');
 
 // Serve the saved process template through a direct download request.
@@ -168,7 +216,7 @@ if (!isset($processTableMap[$processMapKey]) && isset($processKeyAliases[$key]))
 }
 $processConfig = $processTableMap[$processMapKey] ?? null;
 
-if ($key !== 'cut') {
+if (!$isCutProcess) {
     if ($processConfig === null) {
         http_response_code(400);
         exit('No original C# table mapping is configured for process: ' . h($processLabel));
@@ -187,12 +235,11 @@ if ($key !== 'cut') {
     $kModelSuggestions = [];
     $kHours = range(0, 23);
     $kPlanCols = array_map(static fn($i) => 'QTY_YOTEI_' . $i, $kHours);
-    $kActualCols = array_map(static fn($i) => 'QTY_JISSEKI_' . $i, $kHours);
 
     $kCsvModels = [];
     $kCsvError = '';
     try {
-        $kCsv = read_process_master_data($key);
+        $kCsv = read_process_master_data($key === 'cnc_inspection' ? 'cut' : $key);
         $kNorm = static fn($v) => strtolower(preg_replace('/[^a-z0-9]/i', '', (string)$v));
         $kModelCol = $kPartCol = null;
         foreach ($kCsv['headers'] as $i => $header) {
@@ -287,12 +334,11 @@ if ($key !== 'cut') {
                     if ($check->fetchColumn()) {
                         throw new RuntimeException('Model already registered');
                     }
-                    $columns = array_merge(['MODELCD', 'MODELNAME', 'YOTEI_DATE'], $kPlanCols, $kActualCols);
+                    $columns = array_merge(['MODELCD', 'MODELNAME', 'YOTEI_DATE'], $kPlanCols);
                     $placeholders = implode(',', array_fill(0, count($columns), '?'));
                     $insertValues = array_merge(
                         [$model['ITEM_ID'], $model['ITEM_NAME'], $kDate],
-                        $values,
-                        array_fill(0, 24, 0)
+                        $values
                     );
                     $ins = db()->prepare("INSERT INTO dbo.{$processTable} (" . implode(',', array_map(static fn($c) => '[' . $c . ']', $columns)) . ") VALUES ({$placeholders})");
                     $ins->execute($insertValues);
@@ -306,41 +352,36 @@ if ($key !== 'cut') {
                 $kind = (string)($_POST['cell_kind'] ?? '');
                 $hourRaw = (string)($_POST['cell_hour'] ?? '');
                 $valueRaw = trim((string)($_POST['cell_value'] ?? ''));
-                if ($modelCode === '' || !in_array($kind, ['plan', 'actual'], true)
+                if ($modelCode === '' || $kind !== 'plan'
                     || !preg_match('/^(?:[0-9]|1[0-9]|2[0-3])$/', $hourRaw)
                     || !preg_match('/^\d+$/', $valueRaw)) {
                     throw new RuntimeException('Invalid hourly cell update. Enter a non-negative whole number.');
                 }
                 $hour = (int)$hourRaw;
-                $column = $kind === 'plan' ? $kPlanCols[$hour] : $kActualCols[$hour];
+                $column = $kPlanCols[$hour];
                 $cellUpdate = db()->prepare("UPDATE dbo.{$processTable} SET [{$column}] = ?
                     WHERE MODELCD = ? AND YOTEI_DATE >= CAST(? AS date)
                       AND YOTEI_DATE < DATEADD(day, 1, CAST(? AS date))");
                 $cellUpdate->execute([(int)$valueRaw, $modelCode, $kDate, $kDate]);
-                $kNotice = $processLabel . ' ' . ($kind === 'plan' ? 'Schedule' : 'Performance') . ' ' . sprintf('%02d:00', $hour) . ' updated.';
+                $kNotice = $processLabel . ' schedule ' . sprintf('%02d:00', $hour) . ' updated.';
                 if (function_exists('audit_log')) audit_log('UPDATE', $processTable, null, 'Updated ' . $column . ' for ' . $modelCode . ' on ' . $kDate);
             } elseif ($action === 'update_hourly_inline') {
                 $modelCode = trim((string)($_POST['model_code'] ?? ''));
                 if ($modelCode === '') throw new RuntimeException('Invalid Model Code for editing.');
                 $planInput = $_POST['plan'] ?? [];
-                $actualInput = $_POST['actual'] ?? [];
                 $setParts = [];
                 $updateValues = [];
                 foreach ($kHours as $hour) {
                     $setParts[] = '[' . $kPlanCols[$hour] . '] = ?';
                     $updateValues[] = max(0, (int)($planInput[$hour] ?? 0));
                 }
-                foreach ($kHours as $hour) {
-                    $setParts[] = '[' . $kActualCols[$hour] . '] = ?';
-                    $updateValues[] = max(0, (int)($actualInput[$hour] ?? 0));
-                }
                 array_push($updateValues, $modelCode, $kDate, $kDate);
                 $inlineUpdate = db()->prepare("UPDATE dbo.{$processTable} SET " . implode(', ', $setParts) . "
                     WHERE MODELCD = ? AND YOTEI_DATE >= CAST(? AS date)
                       AND YOTEI_DATE < DATEADD(day, 1, CAST(? AS date))");
                 $inlineUpdate->execute($updateValues);
-                $kNotice = $processLabel . ' hourly schedule and performance updated successfully.';
-                if (function_exists('audit_log')) audit_log('UPDATE', $processTable, null, 'Updated all hourly values for ' . $modelCode . ' on ' . $kDate);
+                $kNotice = $processLabel . ' hourly schedule updated successfully.';
+                if (function_exists('audit_log')) audit_log('UPDATE', $processTable, null, 'Updated hourly schedule for ' . $modelCode . ' on ' . $kDate);
             } elseif ($action === 'delete_kitting') {
                 $modelCode = trim((string)($_POST['model_code'] ?? ''));
                 $del = db()->prepare("DELETE FROM dbo.{$processTable}
@@ -355,7 +396,7 @@ if ($key !== 'cut') {
             }
         }
 
-        $selectColumns = array_merge(['MODELCD', 'MODELNAME', 'YOTEI_DATE'], $kPlanCols, $kActualCols);
+        $selectColumns = array_merge(['MODELCD', 'MODELNAME', 'YOTEI_DATE'], $kPlanCols);
         $sql = "SELECT " . implode(', ', array_map(static fn($c) => '[' . $c . ']', $selectColumns)) . "\n                FROM dbo.{$processTable}\n                WHERE YOTEI_DATE >= CAST(? AS date)\n                  AND YOTEI_DATE < DATEADD(day, 1, CAST(? AS date))";
         $params = [$kDate, $kDate];
         if ($kSearch !== '') {
@@ -375,15 +416,14 @@ if ($key !== 'cut') {
             if ($kEdit) $kShowForm = true;
         }
     } catch (Throwable $ex) {
-        $kError = $ex->getMessage();
+        if ((string)($_POST['action'] ?? '') === 'import_hourly_process') { $kImportStats=['inserted'=>0,'updated'=>0,'skipped'=>0]; $kImportErrors=[$ex->getMessage()]; }
+        else { $kError = $ex->getMessage(); }
     }
 
     $kTotalPlan = 0;
-    $kTotalActual = 0;
     foreach ($kRows as $row) {
         foreach ($kHours as $hour) {
             $kTotalPlan += (int)($row[$kPlanCols[$hour]] ?? 0);
-            $kTotalActual += (int)($row[$kActualCols[$hour]] ?? 0);
         }
     }
     $pageTitle = $processLabel;
@@ -393,7 +433,7 @@ if ($key !== 'cut') {
     ?>
     <section class="content kitting-page">
       <div class="page-intro">
-        <div><h2><?=h($processLabel)?> Product Input</h2><p>Hourly schedule and performance records from dbo.<?=h($processTable)?>.</p></div>
+        <div><h2><?=h($processLabel)?> Product Input</h2><p>Hourly schedule records from dbo.<?=h($processTable)?>.</p></div>
       </div>
       <div class="modules"><?php foreach (PROCESS_LIST as $processKey => $processInfo): ?><a class="<?=$processKey === $key ? 'sel' : ''?>" href="?process=<?=h($processKey)?>&date=<?=h($kDate)?>"><?=h($processInfo['label'])?></a><?php endforeach; ?></div>
       <?php if ($kNotice): ?><div class="notice notice-success"><?=h($kNotice)?></div><?php endif; ?>
@@ -446,7 +486,7 @@ if ($key !== 'cut') {
         <?php if($kImportStats): ?>
         <div class="import-result-backdrop" id="import-result-modal">
           <section class="import-result-modal" role="dialog" aria-modal="true" aria-labelledby="import-result-title">
-            <div class="import-result-head"><div><h3 id="import-result-title">Import Results</h3><p><?= (int)$kImportStats['inserted'] ?> inserted · <?= (int)$kImportStats['updated'] ?> updated · <?= (int)$kImportStats['skipped'] ?> skipped</p></div><button type="button" class="import-result-close" aria-label="Close">×</button></div>
+            <div class="import-result-head"><div><h3 id="import-result-title"><?= $kImportErrors ? 'Import Failed — Invalid Format' : 'Import Results' ?></h3><p><?= $kImportErrors ? 'Nothing was imported or updated.' : ((int)$kImportStats['inserted'] . ' inserted · ' . (int)$kImportStats['updated'] . ' updated · ' . (int)$kImportStats['skipped'] . ' skipped') ?></p></div><button type="button" class="import-result-close" aria-label="Close">×</button></div>
             <?php if($kImportErrors): ?><div class="import-error-list"><strong>Rows that need attention</strong><ol><?php foreach($kImportErrors as $importError): ?><li><?=h($importError)?></li><?php endforeach; ?></ol></div><?php else: ?><p class="import-all-good">All rows were imported successfully.</p><?php endif; ?>
             <div class="import-result-actions"><button type="button" class="btn btn-primary import-result-close">Close</button></div>
           </section>
@@ -456,26 +496,25 @@ if ($key !== 'cut') {
           <thead><tr><th rowspan="2" class="kitting-model-col">Model Code</th><th rowspan="2" class="kitting-total-col">Total Qty</th><th colspan="24" class="kitting-time-title">Time Schedule</th><th rowspan="2" class="kitting-action-col">Action</th></tr>
           <tr><?php foreach ($kHours as $hour): ?><th><?=sprintf('%02d:00', $hour)?></th><?php endforeach; ?></tr></thead>
           <tbody>
-          <?php foreach ($kRows as $row): $code = (string)$row['MODELCD']; $planSum = 0; $actualSum = 0; foreach ($kHours as $hour) { $planSum += (int)($row[$kPlanCols[$hour]] ?? 0); $actualSum += (int)($row[$kActualCols[$hour]] ?? 0); } ?>
+          <?php foreach ($kRows as $row): $code = (string)$row['MODELCD']; $planSum = 0; foreach ($kHours as $hour) { $planSum += (int)($row[$kPlanCols[$hour]] ?? 0); } ?>
             <tr class="kitting-schedule-row" data-search="<?=h(strtolower($code . ' ' . (string)$row['MODELNAME']))?>">
-              <td class="kitting-model-cell" rowspan="2"><strong><?=h($code)?></strong><small><?=h((string)$row['MODELNAME'])?></small></td>
+              <td class="kitting-model-cell"><strong><?=h($code)?></strong><small><?=h((string)$row['MODELNAME'])?></small></td>
               <td class="kitting-total-cell"><?=number_format($planSum)?></td>
               <?php foreach ($kHours as $hour): $planValue=(int)($row[$kPlanCols[$hour]] ?? 0); ?><td class="kitting-editable-cell"><span class="kitting-cell-display"><?=number_format($planValue)?></span><input class="kitting-cell-input" type="number" min="0" step="1" name="plan[<?=$hour?>]" value="<?=$planValue?>" form="inline-edit-<?=h(substr(sha1($code),0,12))?>" aria-label="Schedule <?=sprintf('%02d:00',$hour)?>" disabled></td><?php endforeach; ?>
-              <td class="kitting-row-actions" rowspan="2">
+              <td class="kitting-row-actions">
                 <form method="post" id="inline-edit-<?=h(substr(sha1($code),0,12))?>" class="kitting-inline-edit-form"><?=csrf_field()?><input type="hidden" name="action" value="update_hourly_inline"><input type="hidden" name="process" value="<?=h($key)?>"><input type="hidden" name="plan_date" value="<?=h($kDate)?>"><input type="hidden" name="model_code" value="<?=h($code)?>">
-                  <button type="button" class="kitting-icon-btn kitting-edit-btn" title="Edit all hourly cells" aria-label="Edit all hourly cells"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg></button>
+                  <button type="button" class="kitting-icon-btn kitting-edit-btn" title="Edit hourly schedule" aria-label="Edit hourly schedule"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg></button>
                   <button type="submit" class="kitting-icon-btn kitting-save-btn" title="Save changes" aria-label="Save changes" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h12l4 4v14H3V3z"/><path d="M7 3v6h10V3M7 21v-8h10v8"/></svg></button>
                   <button type="button" class="kitting-icon-btn kitting-cancel-btn" title="Cancel editing" aria-label="Cancel editing" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
                 </form>
                 <form method="post" class="kitting-inline-delete-form" onsubmit="return confirm('Delete <?=h(addslashes($processLabel))?> record <?=h(addslashes($code))?>?')"><?=csrf_field()?><input type="hidden" name="action" value="delete_kitting"><input type="hidden" name="process" value="<?=h($key)?>"><input type="hidden" name="plan_date" value="<?=h($kDate)?>"><input type="hidden" name="model_code" value="<?=h($code)?>"><button type="submit" class="kitting-icon-btn kitting-delete-btn" title="Delete record" aria-label="Delete record"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2m3 0-1 15H6L5 6m4 4v7m6-7v7"/></svg></button></form>
               </td>
             </tr>
-              <tr class="kitting-performance-row" data-search="<?=h(strtolower($code . ' ' . (string)$row['MODELNAME']))?>"><td class="kitting-total-cell"><span class="kitting-performance-label">Actual</span><?=number_format($actualSum)?></td><?php foreach ($kHours as $hour): $actualValue=(int)($row[$kActualCols[$hour]] ?? 0); ?><td class="kitting-editable-cell"><span class="kitting-cell-display"><?=number_format($actualValue)?></span><input class="kitting-cell-input" type="number" min="0" step="1" name="actual[<?=$hour?>]" value="<?=$actualValue?>" form="inline-edit-<?=h(substr(sha1($code),0,12))?>" aria-label="Performance <?=sprintf('%02d:00',$hour)?>" disabled></td><?php endforeach; ?></tr>
           <?php endforeach; ?>
           <?php if (!$kRows): ?><tr><td colspan="27" class="kitting-empty">No <?=h($processLabel)?> records for this date.</td></tr><?php endif; ?>
           </tbody>
         </table></div>
-        <div class="kitting-totals"><div><span>Total (Schedule)</span><strong><?=number_format($kTotalPlan)?></strong></div><div><span>Total (Performance)</span><strong><?=number_format($kTotalActual)?></strong></div></div>
+        <div class="kitting-totals"><div><span>Total (Schedule)</span><strong><?=number_format($kTotalPlan)?></strong></div></div>
       </section>
 
       <?php if ($kShowForm): $editHourly = []; foreach ($kHours as $hour) $editHourly[$hour] = (int)($kEdit[$kPlanCols[$hour]] ?? 0); ?>
@@ -818,13 +857,13 @@ try {
   }
  }
 
- if ($key === 'cut') {
+ if ($isCutProcess) {
   $keyMeta = db()->query("SELECT i.name AS index_name, i.is_primary_key, i.index_id,
       ic.key_ordinal, c.name AS column_name
     FROM sys.indexes i
     INNER JOIN sys.index_columns ic ON ic.object_id=i.object_id AND ic.index_id=i.index_id
     INNER JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id
-    WHERE i.object_id=OBJECT_ID(N'dbo.TB_CUTPRESSURE')
+    WHERE i.object_id=OBJECT_ID(N'dbo.{$cutTable}')
       AND i.is_unique=1 AND i.is_disabled=0 AND i.is_hypothetical=0
       AND i.has_filter=0 AND ic.is_included_column=0 AND ic.key_ordinal>0
     ORDER BY i.is_primary_key DESC, i.index_id, ic.key_ordinal")->fetchAll(PDO::FETCH_ASSOC);
@@ -836,7 +875,29 @@ try {
    }
   }
  }
- if($_SERVER['REQUEST_METHOD']==='POST'){verify_csrf();$a=(string)($_POST['action']??'');if($a==='download_import_sample'){production_download_sample($key,$date);}elseif($a==='import_cut_process'){ $cutCatalog=[]; foreach($models as $modelDetails){$cutCatalog[(string)$modelDetails['model_name']]=$modelDetails;} $stats=production_import_cut_records($date,$_FILES['import_file']??[],$cutCatalog);$importStats=$stats;$importErrors=$stats['errors'];$notice='Import completed: '.$stats['inserted'].' inserted, '.$stats['updated'].' updated, '.$stats['skipped'].' skipped.';}elseif($a==='add_machine'){
+ if($_SERVER['REQUEST_METHOD']==='POST'){verify_csrf();$a=(string)($_POST['action']??'');if($a==='ajax_add_machine'){
+  header('Content-Type: application/json; charset=utf-8');
+  try {
+   $newMachine=trim((string)($_POST['new_machine']??''));
+   if($newMachine==='') throw new RuntimeException('Enter a machine name first.');
+   if((function_exists('mb_strlen')?mb_strlen($newMachine,'UTF-8'):strlen($newMachine))>100) throw new RuntimeException('Machine name must not exceed 100 characters.');
+   $check=db()->prepare('SELECT TOP 1 id FROM dbo.machine WHERE Machine=? AND Process=?');
+   $check->execute([$newMachine,$key]);
+   if($existing=$check->fetch(PDO::FETCH_ASSOC)){
+    echo json_encode(['success'=>true,'duplicate'=>true,'id'=>(int)$existing['id'],'machine'=>$newMachine,'message'=>'This machine already exists for this process.']);
+   } else {
+    $ins=db()->prepare('INSERT INTO dbo.machine(Machine,Process) VALUES(?,?)');
+    $ins->execute([$newMachine,$key]);
+    $machineId=(int)db()->lastInsertId();
+    audit_log('CREATE','machine',$machineId,'Added machine '.$newMachine.' for process '.$key);
+    echo json_encode(['success'=>true,'duplicate'=>false,'id'=>$machineId,'machine'=>$newMachine,'message'=>'Machine added successfully.']);
+   }
+  } catch(Throwable $ajaxError) {
+   http_response_code(400);
+   echo json_encode(['success'=>false,'message'=>$ajaxError->getMessage()]);
+  }
+  exit;
+ }elseif($a==='download_import_sample'){production_download_sample($key,$date);}elseif($a==='import_cut_process'){ $cutCatalog=[]; foreach($models as $modelDetails){$cutCatalog[(string)$modelDetails['model_name']]=$modelDetails;} $stats=production_import_cut_records($date,$_FILES['import_file']??[],$cutCatalog,$key);$importStats=$stats;$importErrors=$stats['errors'];$notice='Import completed: '.$stats['inserted'].' inserted, '.$stats['updated'].' updated, '.$stats['skipped'].' skipped.';}elseif($a==='add_machine'){
   $newMachine=trim((string)($_POST['new_machine']??''));
   if($newMachine==='') throw new RuntimeException('Enter a machine name first.');
   if((function_exists('mb_strlen')?mb_strlen($newMachine,'UTF-8'):strlen($newMachine))>100) throw new RuntimeException('Machine name must not exceed 100 characters.');
@@ -862,50 +923,49 @@ try {
    $notice='Machine was not found for this process.';
   }
  } elseif ($a === 'edit_cut_details') {
-  if ($key !== 'cut' || !$cutKeyColumns) throw new RuntimeException('Cut & Crimp record editing is unavailable because no unique row key is configured.');
+  if (!$isCutProcess || !$cutKeyColumns) throw new RuntimeException($processLabel . ' record editing is unavailable because no unique row key is configured.');
   $rowToken=trim((string)($_POST['cut_row_token']??''));
   $decoded=base64_decode(strtr($rowToken,'-_','+/'),true);
   $keyValues=$decoded===false?null:json_decode($decoded,true);
-  if(!is_array($keyValues)||count($keyValues)!==count($cutKeyColumns)) throw new RuntimeException('Invalid Cut & Crimp row selected. Please reopen the Edit window.');
+  if(!is_array($keyValues)||count($keyValues)!==count($cutKeyColumns)) throw new RuntimeException('Invalid ' . $processLabel . ' row selected. Please reopen the Edit window.');
   $machine=trim((string)($_POST['machine_no']??''));
   $shift=trim((string)($_POST['shift_name']??''));
   $start=trim((string)($_POST['start_time']??''));
   $end=trim((string)($_POST['end_time']??''));
   $plannedRaw=trim((string)($_POST['planned_qty']??''));
-  $actualRaw=trim((string)($_POST['actual_qty']??''));
   if($machine==='') throw new RuntimeException('Select a Machine No.');
   $machineCheck=db()->prepare('SELECT TOP 1 id FROM dbo.machine WHERE Machine=? AND Process=?');
-  $machineCheck->execute([$machine,'cut']);
+  $machineCheck->execute([$machine,$key]);
   if(!$machineCheck->fetchColumn()) throw new RuntimeException('Please choose a Machine No. from the registered machine list.');
   if(!in_array($shift,['Day','Night'],true)) throw new RuntimeException('Select Day or Night.');
   foreach([$start,$end] as $time) if($time!=='' && !preg_match('/^([01]\d|2[0-3]):[0-5]\d$/',$time)) throw new RuntimeException('Enter valid Start Time and End Time.');
-  if($plannedRaw===''||!ctype_digit($plannedRaw)||$actualRaw===''||!ctype_digit($actualRaw)) throw new RuntimeException('Planned Qty and Actual Qty must be non-negative whole numbers.');
+  if($plannedRaw===''||!ctype_digit($plannedRaw)) throw new RuntimeException('Planned Qty must be a non-negative whole number.');
   $start=$start?:'00:00'; $end=$end?:'00:00';
   [$sh,$sm]=array_map('intval',explode(':',$start)); [$eh,$em]=array_map('intval',explode(':',$end));
-  $updateValues=['MACHINE_NO'=>$machine,'DAY_NIGHT'=>$shift==='Night'?1:0,'START_TIME_H'=>$sh,'START_TIME_M'=>$sm,'ENDY_TIME_H'=>$eh,'ENDY_TIME_M'=>$em,'END_TIME_H'=>$eh,'END_TIME_M'=>$em,'QTY_YOTEI'=>(int)$plannedRaw,'QTY_JISSEKI'=>(int)$actualRaw];
+  $updateValues=['MACHINE_NO'=>$machine,'DAY_NIGHT'=>$shift==='Night'?1:0,'START_TIME_H'=>$sh,'START_TIME_M'=>$sm,'ENDY_TIME_H'=>$eh,'ENDY_TIME_M'=>$em,'END_TIME_H'=>$eh,'END_TIME_M'=>$em,'QTY_YOTEI'=>(int)$plannedRaw];
   $setParts=[];$params=[];
   foreach($updateValues as $column=>$value){$setParts[]='['.str_replace(']',']]',$column).']=?';$params[]=$value;}
   $whereParts=[];
   foreach($cutKeyColumns as $index=>$column){$whereParts[]='['.str_replace(']',']]',$column).']=?';$params[]=$keyValues[$index];}
-  $upd=db()->prepare('UPDATE dbo.TB_CUTPRESSURE SET '.implode(', ',$setParts).' WHERE '.implode(' AND ',$whereParts));
+  $upd=db()->prepare("UPDATE dbo.{$cutTable} SET ".implode(', ',$setParts).' WHERE '.implode(' AND ',$whereParts));
   $upd->execute($params);
-  if($upd->rowCount()<1) throw new RuntimeException('The selected Cut & Crimp record was not updated. It may have changed or been deleted.');
-  audit_log('UPDATE','TB_CUTPRESSURE',null,'Updated Cut & Crimp production details');
-  $notice='Cut & Crimp record updated successfully.';
+  if($upd->rowCount()<1) throw new RuntimeException('The selected ' . $processLabel . ' record was not updated. It may have changed or been deleted.');
+  audit_log('UPDATE',$cutTable,null,'Updated '.$processLabel.' production details');
+  $notice=$processLabel . ' record updated successfully.';
  } elseif ($a === 'save') {
   $id=(int)($_POST['id']??0);
   $code=trim((string)($_POST['model_code']??''));
   $name=trim((string)($_POST['model_name']??'')); // Part Name from the selected CSV row
   $planned=max(0,(int)($_POST['planned_qty']??0));
-  $actual=max(0,(int)($_POST['actual_qty']??0));
+  $actual=max(0,(int)($_POST['actual_qty']??0)); // Used only by non-Cut processes.
   if($code==='') throw new RuntimeException('Please select a Model Name from the CSV list.');
   $machine=trim((string)($_POST['machine_no']??''));
   $shift=trim((string)($_POST['shift_name']??''));
   $start=trim((string)($_POST['start_time']??''));
   $end=trim((string)($_POST['end_time']??''));
   $notes=trim((string)($_POST['notes']??''));
-  if($key==='cut') {
-   if (!$cutKeyColumns) throw new RuntimeException('TB_CUTPRESSURE has no primary key or unfiltered unique index. Add a unique row identifier before editing records.');
+  if($isCutProcess) {
+   if (!$cutKeyColumns) throw new RuntimeException($cutTable . ' has no primary key or unfiltered unique index. Add a unique row identifier before editing records.');
    // Build MODELNAME from the selected CSV record, not from editable browser values.
    $selectedModel = null;
    foreach ($models as $modelDetails) {
@@ -940,7 +1000,7 @@ try {
     'START_TIME_H'=>$sh, 'START_TIME_M'=>$sm,
     'ENDY_TIME_H'=>$eh, 'ENDY_TIME_M'=>$em,
     'END_TIME_H'=>$eh, 'END_TIME_M'=>$em,
-    'QTY_YOTEI'=>$planned, 'QTY_JISSEKI'=>$actual
+    'QTY_YOTEI'=>$planned
    ];
    $rowToken = trim((string)($_POST['cut_row_token'] ?? ''));
    if ($rowToken !== '') {
@@ -956,13 +1016,13 @@ try {
     foreach ($cutKeyColumns as $index=>$column) {
      $whereParts[]='['.$column.']=?'; $updateParams[]=$keyValues[$index];
     }
-    $upd=db()->prepare('UPDATE dbo.TB_CUTPRESSURE SET '.implode(', ',$setParts).' WHERE '.implode(' AND ',$whereParts));
+    $upd=db()->prepare("UPDATE dbo.{$cutTable} SET ".implode(', ',$setParts).' WHERE '.implode(' AND ',$whereParts));
     $upd->execute($updateParams);
-    if ($upd->rowCount() < 1) throw new RuntimeException('The selected Cut & Crimp record could not be updated. It may have been changed or deleted.');
-    audit_log('UPDATE','TB_CUTPRESSURE',null,'Updated Cut & Crimp plan '.$code);
+    if ($upd->rowCount() < 1) throw new RuntimeException('The selected ' . $processLabel . ' record could not be updated. It may have been changed or deleted.');
+    audit_log('UPDATE',$cutTable,null,'Updated '.$processLabel.' plan '.$code);
    } else {
     // Prevent registering the same Model Code twice for the same production date.
-    $duplicateCheck = db()->prepare("SELECT TOP 1 1 FROM dbo.TB_CUTPRESSURE
+    $duplicateCheck = db()->prepare("SELECT TOP 1 1 FROM dbo.{$cutTable}
       WHERE MODELCD = ?
         AND YOTEI_DATE >= CAST(? AS date)
         AND YOTEI_DATE < DATEADD(day, 1, CAST(? AS date))");
@@ -971,9 +1031,9 @@ try {
      throw new RuntimeException('Model already registered');
     }
     $insertColumns=array_keys($cutValues);
-    $sql='INSERT INTO dbo.TB_CUTPRESSURE ('.implode(',',array_map(static fn($c)=>'['.$c.']',$insertColumns)).') VALUES ('.implode(',',array_fill(0,count($insertColumns),'?')).')';
+    $sql="INSERT INTO dbo.{$cutTable} (".implode(',',array_map(static fn($c)=>'['.$c.']',$insertColumns)).') VALUES ('.implode(',',array_fill(0,count($insertColumns),'?')).')';
     db()->prepare($sql)->execute(array_values($cutValues));
-    audit_log('CREATE','TB_CUTPRESSURE',null,'Created Cut & Crimp plan '.$code);
+    audit_log('CREATE',$cutTable,null,'Created '.$processLabel.' plan '.$code);
    }
   } elseif ($id) {
    $st=db()->prepare('UPDATE dbo.web_production_plan SET model_code=?,model_name=?,machine_no=?,shift_name=?,start_time=?,end_time=?,planned_qty=?,actual_qty=?,notes=?,updated_by=?,updated_at=SYSDATETIME() WHERE id=? AND process_key=?');
@@ -986,18 +1046,18 @@ try {
   }
   $notice='Plan saved.';
  } elseif ($a==='delete') {
-  if($key==='cut') {
-   if (!$cutKeyColumns) throw new RuntimeException('TB_CUTPRESSURE has no primary key or unfiltered unique index. Add a unique row identifier before deleting records.');
+  if($isCutProcess) {
+   if (!$cutKeyColumns) throw new RuntimeException($cutTable . ' has no primary key or unfiltered unique index. Add a unique row identifier before deleting records.');
    $rowToken=trim((string)($_POST['cut_row_token']??''));
    $decoded=base64_decode(strtr($rowToken,'-_','+/'),true);
    $keyValues=$decoded===false?null:json_decode($decoded,true);
-   if(!is_array($keyValues)||count($keyValues)!==count($cutKeyColumns)) throw new RuntimeException('Invalid Cut & Crimp row selected for deletion.');
+   if(!is_array($keyValues)||count($keyValues)!==count($cutKeyColumns)) throw new RuntimeException('Invalid ' . $processLabel . ' row selected for deletion.');
    $whereParts=[];$params=[];
    foreach($cutKeyColumns as $index=>$column){$whereParts[]='['.$column.']=?';$params[]=$keyValues[$index];}
-   $del=db()->prepare('DELETE FROM dbo.TB_CUTPRESSURE WHERE '.implode(' AND ',$whereParts));
+   $del=db()->prepare("DELETE FROM dbo.{$cutTable} WHERE ".implode(' AND ',$whereParts));
    $del->execute($params);
-   if($del->rowCount()<1) throw new RuntimeException('The selected Cut & Crimp record was not found.');
-   audit_log('DELETE','TB_CUTPRESSURE',null,'Deleted Cut & Crimp record');
+   if($del->rowCount()<1) throw new RuntimeException('The selected ' . $processLabel . ' record was not found.');
+   audit_log('DELETE',$cutTable,null,'Deleted '.$processLabel.' record');
   } else {
    $id=(int)($_POST['id']??0);
    db()->prepare('DELETE FROM dbo.web_production_plan WHERE id=? AND process_key=?')->execute([$id,$key]);
@@ -1007,7 +1067,7 @@ try {
  }
 }
  $machineSt=db()->prepare('SELECT id, Machine FROM dbo.machine WHERE Process=? ORDER BY Machine ASC');$machineSt->execute([$key]);$machines=$machineSt->fetchAll(PDO::FETCH_ASSOC);
- if($key==='cut') {
+ if($isCutProcess) {
   $keySelect = '';
   foreach ($cutKeyColumns as $keyIndex=>$keyColumn) {
    $safeColumn = str_replace(']', ']]', $keyColumn);
@@ -1022,8 +1082,8 @@ try {
    CONCAT(RIGHT(CONCAT('0',COALESCE(START_TIME_H,0)),2),':',RIGHT(CONCAT('0',COALESCE(START_TIME_M,0)),2)) AS start_time,
    CONCAT(RIGHT(CONCAT('0',COALESCE(END_TIME_H,ENDY_TIME_H,0)),2),':',RIGHT(CONCAT('0',COALESCE(END_TIME_M,ENDY_TIME_M,0)),2)) AS end_time,
    COALESCE(QTY_YOTEI,0) AS planned_qty,
-   COALESCE(QTY_JISSEKI,0) AS actual_qty
-   FROM dbo.TB_CUTPRESSURE
+   CAST(0 AS int) AS actual_qty
+   FROM dbo.{$cutTable}
    WHERE YOTEI_DATE >= CAST(? AS date) AND YOTEI_DATE < DATEADD(day,1,CAST(? AS date))
    ORDER BY START_TIME_H,START_TIME_M,MODELCD");
   $st->execute([$date,$date]);
@@ -1032,7 +1092,7 @@ try {
   $st->execute([$key,$date]);
  }
  $rows=$st->fetchAll(PDO::FETCH_ASSOC);
- if($key==='cut' && $cutKeyColumns) {
+ if($isCutProcess && $cutKeyColumns) {
   foreach($rows as &$cutRow) {
    $keyValues=[];
    foreach($cutKeyColumns as $keyIndex=>$keyColumn) $keyValues[]=$cutRow['__rowkey_'.$keyIndex]??null;
@@ -1042,10 +1102,10 @@ try {
   }
   unset($cutRow);
  }
- if($key!=='cut' && isset($_GET['edit'])) foreach($rows as $r) if((int)$r['id']===(int)$_GET['edit']) $edit=$r;
-} catch(Throwable $ex){$error=$ex->getMessage();}
+ if(!$isCutProcess && isset($_GET['edit'])) foreach($rows as $r) if((int)$r['id']===(int)$_GET['edit']) $edit=$r;
+} catch(Throwable $ex){ if((string)($_POST['action']??'')==='import_cut_process'){ $importStats=['inserted'=>0,'updated'=>0,'skipped'=>0]; $importErrors=[$ex->getMessage()]; } else {$error=$ex->getMessage();} }
 $e=$edit??[]; $planned=array_sum(array_map(fn($r)=>(int)$r['planned_qty'],$rows));$actual=array_sum(array_map(fn($r)=>(int)$r['actual_qty'],$rows));
-?><?php $pageTitle=PROCESS_LIST[process_key()]['label']; $activePage='production'; $currentProcess=process_key(); require __DIR__.'/includes/header.php'; ?><section class="content"><div class="page-intro"><div><h2>Daily production plan</h2><p>Model suggestions are read from this process's live CSV source.</p></div></div><div class="modules"><?php foreach(PROCESS_LIST as $k=>$p):?><a class="<?=$k===$key?'sel':''?>" href="?process=<?=h($k)?>&date=<?=h($date)?>"><?=h($p['label'])?></a><?php endforeach;?></div><?php if($notice):?><div class="notice notice-success"><?=h($notice)?></div><?php endif;?><?php if($error):?><div class="notice notice-error model-duplicate-error"><?=h($error)?></div><?php endif;?><?php if($key==='cut' && !$cutKeyColumns):?><div class="notice notice-error">Edit/Delete are unavailable because dbo.TB_CUTPRESSURE has no primary key or unfiltered unique index. Add a unique row identifier to enable safe record-level actions.</div><?php endif;?><section class="panel"><div class="panel-head cut-register-panel-head"><div><h3><?= $edit?'Edit plan':'Register plan'?></h3><p><?=count($models)?> models/parts available from CSV</p></div><form method="get" class="cut-date-form"><input type="hidden" name="process" value="<?=h($key)?>"><input type="date" name="date" value="<?=h($date)?>" onchange="this.form.submit()" aria-label="Schedule date"></form><button type="button" class="btn btn-secondary btn-small" id="open-process-import">Import</button></div><form method="post" class="grid production-plan-grid"><?=csrf_field()?><input type="hidden" name="action" value="save"><input type="hidden" name="process" value="<?=h($key)?>"><input type="hidden" name="plan_date" value="<?=h($date)?>"><input type="hidden" name="id" value="<?=h($e['id']??'')?>"><?php if($key==='cut' && $edit):?><input type="hidden" name="cut_row_token" value="<?=h($e['row_token']??'')?>"><?php endif;?><label class="model-combo-label">Model Name<div class="model-combo-wrap"><input id="model_name_combo" type="text" required autocomplete="off" aria-autocomplete="list" aria-expanded="false" aria-controls="model-options" placeholder="Select or search a model name" value="<?=h($e['model_code']??'')?>"><input type="hidden" id="model_code" name="model_code" value="<?=h($e['model_code']??'')?>"><input type="hidden" id="model_name" name="model_name" value="<?=h($e['model_name']??'')?>"><button type="button" class="model-combo-toggle" id="model_combo_toggle" aria-label="Show model names">▾</button><div class="model-combo-options" id="model-options" role="listbox" hidden><?php foreach($models as $details):?><button type="button" class="model-combo-option" data-model-name="<?=h($details['model_name'])?>" data-part-name="<?=h($details['part_name'])?>" data-branch="<?=h($details['branch'])?>" data-barcode="<?=h($details['barcode'])?>" data-model-code="<?=h($details['model_code'])?>" data-type="<?=h($details['type'])?>" data-color="<?=h($details['color'])?>" data-length="<?=h($details['length'])?>"><strong><?=h($details['model_name'])?></strong><span><?=h($details['part_name'])?> - Branch <?=h($details['branch'])?></span></button><?php endforeach;?></div></div></label><label>Part Name<input id="part_name_display" type="text" value="" readonly tabindex="-1"></label><label>Branch<input id="branch_display" type="text" value="" readonly tabindex="-1"></label><label>BarCode<input id="barcode_display" type="text" value="" readonly tabindex="-1"></label><label>Model<input id="model_code_display" type="text" value="" readonly tabindex="-1"></label><label>Type<input id="type_display" type="text" value="" readonly tabindex="-1"></label><label>Color<input id="color_display" type="text" value="" readonly tabindex="-1"></label><label>Length<input id="length_display" type="text" value="" readonly tabindex="-1"></label><label class="machine-picker-label">Machine No.<div class="machine-picker-wrap"><input type="text" id="machine_no_display" name="machine_no" required autocomplete="off" placeholder="Select Machine" value="<?=h($e['machine_no']??$machineSelection)?>" aria-expanded="false" aria-controls="machine-options"><button type="button" class="machine-picker-toggle" id="machine_picker_toggle" aria-label="Show machines">▾</button><div class="machine-picker-options" id="machine-options" hidden><div class="machine-picker-list" id="machine-picker-list"><button type="button" class="machine-picker-option machine-picker-placeholder" data-machine="">Select Machine</button><?php foreach($machines as $machineOption):?><div class="machine-picker-row"><button type="button" class="machine-picker-option" data-machine="<?=h($machineOption['Machine'])?>"><?=h($machineOption['Machine'])?></button><button type="button" class="machine-picker-delete" data-machine-id="<?=(int)$machineOption['id']?>" data-machine-name="<?=h($machineOption['Machine'])?>" aria-label="Delete <?=h($machineOption['Machine'])?>" title="Delete machine">−</button></div><?php endforeach;?></div><div class="machine-picker-add"><input type="text" id="new_machine" name="new_machine" maxlength="100" placeholder="Type new machine name"><button type="button" class="btn btn-primary btn-small" id="add_machine_btn">Add</button></div></div></div><input type="hidden" name="machine_id" id="machine_id_to_delete" value=""></label><label>Shift<select name="shift_name" required><option value="">Select</option><?php foreach(['Day','Night'] as $v):?><option <?=($e['shift_name']??'')===$v?'selected':''?>><?=h($v)?></option><?php endforeach;?></select></label><label>Start Time<input type="time" name="start_time" value="<?=h(isset($e['start_time'])?substr((string)$e['start_time'],0,5):'')?>"></label><label>End Time<input type="time" name="end_time" value="<?=h(isset($e['end_time'])?substr((string)$e['end_time'],0,5):'')?>"></label><label>Planned Qty<input type="number" min="0" name="planned_qty" value="<?=h($e['planned_qty']??0)?>"></label><label>Actual Qty<input type="number" min="0" name="actual_qty" value="<?=h($e['actual_qty']??0)?>"></label><?php if($key!=='cut'):?><label class="wide">Remarks<input name="notes" value="<?=h($e['notes']??'')?>"></label><?php endif;?><div class="wide"><button class="btn btn-primary" id="save_plan_btn" type="submit" disabled><?= $edit ? 'Update Plan' : 'Save Plan' ?></button> <?php if($edit):?><a class="btn btn-ghost" href="?process=<?=h($key)?>&date=<?=h($date)?>">Cancel</a><?php endif;?></div></form></section><div class="process-import-backdrop" id="process-import-modal" hidden><section class="process-import-modal" role="dialog" aria-modal="true" aria-labelledby="process-import-title"><div class="process-import-head"><div><h3 id="process-import-title">Import Cut &amp; Crimp Data</h3><p>Excel (.xlsx) and CSV (.csv) are supported. Matching Model Code and Production Date records will be updated; new records will be inserted.</p></div><button type="button" class="process-import-close" aria-label="Close">×</button></div><form method="post" enctype="multipart/form-data" class="process-import-form" id="cut-process-import-form"><?=csrf_field()?><input type="hidden" name="action" value="import_cut_process"><input type="hidden" name="process" value="cut"><input type="hidden" name="plan_date" value="<?=h($date)?>"><label>Select Excel or CSV File<input type="file" name="import_file" accept=".xlsx,.csv" required></label></form><div class="process-import-actions"><button class="btn btn-primary" type="submit" form="cut-process-import-form">Import File</button><a class="btn btn-secondary" href="?process=cut&amp;date=<?=rawurlencode($date)?>&amp;download_sample=1">Generate Sample Format</a></div></section></div><?php if($importStats): ?><div class="import-result-backdrop" id="import-result-modal"><section class="import-result-modal" role="dialog" aria-modal="true" aria-labelledby="import-result-title"><div class="import-result-head"><div><h3 id="import-result-title">Import Results</h3><p><?= (int)$importStats['inserted'] ?> inserted · <?= (int)$importStats['updated'] ?> updated · <?= (int)$importStats['skipped'] ?> skipped</p></div><button type="button" class="import-result-close" aria-label="Close">×</button></div><?php if($importErrors): ?><div class="import-error-list"><strong>Rows that need attention</strong><ol><?php foreach($importErrors as $importError): ?><li><?=h($importError)?></li><?php endforeach; ?></ol></div><?php else: ?><p class="import-all-good">All rows were imported successfully.</p><?php endif; ?><div class="import-result-actions"><button type="button" class="btn btn-primary import-result-close">Close</button></div></section></div><?php endif; ?><div class="stats-grid stats-grid-csv"><article class="stat-card"><span>Records</span><div class="stat-value"><?=count($rows)?></div></article><article class="stat-card"><span>Planned</span><div class="stat-value"><?=number_format($planned)?></div></article><article class="stat-card"><span>Actual</span><div class="stat-value"><?=number_format($actual)?></div></article><article class="stat-card"><span>Remaining</span><div class="stat-value"><?=number_format(max(0,$planned-$actual))?></div></article></div><section class="panel data-panel"><div class="panel-head daily-records-head"><h3>Daily records — <?=h($date)?></h3><div class="table-search-wrap"><input type="search" id="daily_records_search" class="table-search-input" placeholder="Search model code, model name, machine..." autocomplete="off" aria-label="Search daily records"><span class="table-search-count" id="daily_records_search_count"><?=count($rows)?> records</span></div></div><div class="table-wrap"><table class="admin-table" id="daily_records_table"><thead><tr><th>Model Code</th><th>Model Name</th><th>Machine</th><th>Shift</th><th>Time</th><th>Planned</th><th>Actual</th><th>Remaining</th><th>Action</th></tr></thead><tbody><?php foreach($rows as $r):?><tr><td><?=h($r['model_code'])?></td><td><?php if($key==='cut'){$displayPart='';$displayModel='';if(preg_match('/Model:\s*([^|]*)/u',(string)$r['model_name'],$dm))$displayModel=trim($dm[1]);if(preg_match('/PartName:\s*([^|]*)/u',(string)$r['model_name'],$dp))$displayPart=trim($dp[1]);echo h('PartName: '.$displayPart.' | Model: '.$displayModel);}else{echo h($r['model_name']);}?></td><td><?=h($r['machine_no'])?></td><td><?=h($r['shift_name'])?></td><td><?=h(substr((string)$r['start_time'],0,5))?>–<?=h(substr((string)$r['end_time'],0,5))?></td><td><?=number_format((int)$r['planned_qty'])?></td><td><?=number_format((int)$r['actual_qty'])?></td><td><?=number_format(max(0,(int)$r['planned_qty']-(int)$r['actual_qty']))?></td><td><?php if($key==='cut'):?><?php if($cutKeyColumns):?><button type="button" class="btn btn-secondary btn-small action-icon-btn cut-edit-open" data-row-token="<?=h($r['row_token'])?>" data-machine="<?=h($r['machine_no'])?>" data-shift="<?=h($r['shift_name'])?>" data-start="<?=h(substr((string)$r['start_time'],0,5))?>" data-end="<?=h(substr((string)$r['end_time'],0,5))?>" data-planned="<?=(int)$r['planned_qty']?>" data-actual="<?=(int)$r['actual_qty']?>" title="Edit" aria-label="Edit"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg></button> <form method="post" style="display:inline" onsubmit="return confirm('Delete this Cut & Crimp record?')"><?=csrf_field()?><input type="hidden" name="action" value="delete"><input type="hidden" name="process" value="<?=h($key)?>"><input type="hidden" name="plan_date" value="<?=h($date)?>"><input type="hidden" name="cut_row_token" value="<?=h($r['row_token'])?>"><button class="btn btn-ghost btn-small action-icon-btn delete-action-btn" title="Delete" aria-label="Delete"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/><path d="M10 11v5M14 11v5"/></svg></button></form><?php else:?>—<?php endif;?><?php else:?><a class="btn btn-secondary btn-small action-icon-btn" href="?process=<?=h($key)?>&date=<?=h($date)?>&edit=<?=(int)$r['id']?>" title="Edit" aria-label="Edit"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg></a><form method="post" style="display:inline" onsubmit="return confirm('Delete this plan?')"><?=csrf_field()?><input type="hidden" name="action" value="delete"><input type="hidden" name="process" value="<?=h($key)?>"><input type="hidden" name="plan_date" value="<?=h($date)?>"><input type="hidden" name="id" value="<?=(int)$r['id']?>"><button class="btn btn-ghost btn-small action-icon-btn delete-action-btn" title="Delete" aria-label="Delete"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/><path d="M10 11v5M14 11v5"/></svg></button></form><?php endif;?></td></tr><?php endforeach;?><?php if(!$rows):?><tr><td colspan="9">No plan records for this date.</td></tr><?php endif;?></tbody></table></div></section><?php if($key==='cut' && $cutKeyColumns):?><div class="cut-edit-modal-backdrop" id="cut_edit_modal" hidden><section class="cut-edit-modal" role="dialog" aria-modal="true" aria-labelledby="cut_edit_title"><div class="cut-edit-modal-head"><div><h3 id="cut_edit_title">Edit Cut &amp; Crimp Record</h3><p>Only production details can be changed. Model and Part Name remain locked.</p></div><button type="button" class="cut-edit-close" aria-label="Close">&times;</button></div><form method="post" id="cut_edit_form"><?=csrf_field()?><input type="hidden" name="action" value="edit_cut_details"><input type="hidden" name="process" value="cut"><input type="hidden" name="plan_date" value="<?=h($date)?>"><input type="hidden" name="cut_row_token" id="cut_edit_row_token"><div class="cut-edit-grid"><label>Machine No.<select name="machine_no" id="cut_edit_machine" required><option value="">Select Machine</option><?php foreach($machines as $machineOption):?><option value="<?=h($machineOption['Machine'])?>"><?=h($machineOption['Machine'])?></option><?php endforeach;?></select></label><label>Shift<select name="shift_name" id="cut_edit_shift" required><option value="">Select</option><option value="Day">Day</option><option value="Night">Night</option></select></label><label>Start Time<input type="time" name="start_time" id="cut_edit_start"></label><label>End Time<input type="time" name="end_time" id="cut_edit_end"></label><label>Planned Qty<input type="number" min="0" step="1" name="planned_qty" id="cut_edit_planned" required></label><label>Actual Qty<input type="number" min="0" step="1" name="actual_qty" id="cut_edit_actual" required></label></div><div class="cut-edit-actions"><button type="submit" class="btn btn-primary">Update Record</button></div></form></section></div><?php endif;?></section><style>
+?><?php $pageTitle=PROCESS_LIST[process_key()]['label']; $activePage='production'; $currentProcess=process_key(); require __DIR__.'/includes/header.php'; ?><section class="content"><div class="page-intro"><div><h2>Daily production plan</h2><p>Model suggestions are read from this process's live CSV source.</p></div></div><div class="modules"><?php foreach(PROCESS_LIST as $k=>$p):?><a class="<?=$k===$key?'sel':''?>" href="?process=<?=h($k)?>&date=<?=h($date)?>"><?=h($p['label'])?></a><?php endforeach;?></div><?php if($notice):?><div class="notice notice-success"><?=h($notice)?></div><?php endif;?><?php if($error):?><div class="notice notice-error model-duplicate-error"><?=h($error)?></div><?php endif;?><?php if($isCutProcess && !$cutKeyColumns):?><div class="notice notice-error">Edit/Delete are unavailable because dbo.<?=h($cutTable)?> has no primary key or unfiltered unique index. Add a unique row identifier to enable safe record-level actions.</div><?php endif;?><section class="panel"><div class="panel-head cut-register-panel-head"><div><h3><?= $edit?'Edit plan':'Register plan'?></h3><p><?=count($models)?> models/parts available from CSV</p></div><form method="get" class="cut-date-form"><input type="hidden" name="process" value="<?=h($key)?>"><input type="date" name="date" value="<?=h($date)?>" onchange="this.form.submit()" aria-label="Schedule date"></form><button type="button" class="btn btn-secondary btn-small" id="open-process-import">Import</button></div><form method="post" class="grid production-plan-grid"><?=csrf_field()?><input type="hidden" name="action" value="save"><input type="hidden" name="process" value="<?=h($key)?>"><input type="hidden" name="plan_date" value="<?=h($date)?>"><input type="hidden" name="id" value="<?=h($e['id']??'')?>"><?php if($isCutProcess && $edit):?><input type="hidden" name="cut_row_token" value="<?=h($e['row_token']??'')?>"><?php endif;?><label class="model-combo-label">Model Name<div class="model-combo-wrap"><input id="model_name_combo" type="text" required autocomplete="off" aria-autocomplete="list" aria-expanded="false" aria-controls="model-options" placeholder="Select or search a model name" value="<?=h($e['model_code']??'')?>"><input type="hidden" id="model_code" name="model_code" value="<?=h($e['model_code']??'')?>"><input type="hidden" id="model_name" name="model_name" value="<?=h($e['model_name']??'')?>"><button type="button" class="model-combo-toggle" id="model_combo_toggle" aria-label="Show model names">▾</button><div class="model-combo-options" id="model-options" role="listbox" hidden><?php foreach($models as $details):?><button type="button" class="model-combo-option" data-model-name="<?=h($details['model_name'])?>" data-part-name="<?=h($details['part_name'])?>" data-branch="<?=h($details['branch'])?>" data-barcode="<?=h($details['barcode'])?>" data-model-code="<?=h($details['model_code'])?>" data-type="<?=h($details['type'])?>" data-color="<?=h($details['color'])?>" data-length="<?=h($details['length'])?>"><strong><?=h($details['model_name'])?></strong><span><?=h($details['part_name'])?> - Branch <?=h($details['branch'])?></span></button><?php endforeach;?></div></div></label><label>Part Name<input id="part_name_display" type="text" value="" readonly tabindex="-1"></label><label>Branch<input id="branch_display" type="text" value="" readonly tabindex="-1"></label><label>BarCode<input id="barcode_display" type="text" value="" readonly tabindex="-1"></label><label>Model<input id="model_code_display" type="text" value="" readonly tabindex="-1"></label><label>Type<input id="type_display" type="text" value="" readonly tabindex="-1"></label><label>Color<input id="color_display" type="text" value="" readonly tabindex="-1"></label><label>Length<input id="length_display" type="text" value="" readonly tabindex="-1"></label><label class="machine-picker-label">Machine No.<div class="machine-picker-wrap"><input type="text" id="machine_no_display" name="machine_no" required autocomplete="off" placeholder="Select Machine" value="<?=h($e['machine_no']??'')?>" aria-expanded="false" aria-controls="machine-options"><button type="button" class="machine-picker-toggle" id="machine_picker_toggle" aria-label="Show machines">▾</button><div class="machine-picker-options" id="machine-options" hidden><div class="machine-picker-list" id="machine-picker-list"><button type="button" class="machine-picker-option machine-picker-placeholder" data-machine="">Select Machine</button><?php foreach($machines as $machineOption):?><div class="machine-picker-row"><button type="button" class="machine-picker-option" data-machine="<?=h($machineOption['Machine'])?>"><?=h($machineOption['Machine'])?></button><button type="button" class="machine-picker-delete" data-machine-id="<?=(int)$machineOption['id']?>" data-machine-name="<?=h($machineOption['Machine'])?>" aria-label="Delete <?=h($machineOption['Machine'])?>" title="Delete machine">−</button></div><?php endforeach;?></div><div class="machine-picker-add"><input type="text" id="new_machine" name="new_machine" maxlength="100" placeholder="Type new machine name"><button type="button" class="btn btn-primary btn-small" id="add_machine_btn">Add</button></div></div></div><input type="hidden" name="machine_id" id="machine_id_to_delete" value=""></label><label>Shift<select name="shift_name" required><option value="">Select</option><?php foreach(['Day','Night'] as $v):?><option <?=($e['shift_name']??'')===$v?'selected':''?>><?=h($v)?></option><?php endforeach;?></select></label><label>Start Time<input type="time" name="start_time" value="<?=h(isset($e['start_time'])?substr((string)$e['start_time'],0,5):'')?>"></label><label>End Time<input type="time" name="end_time" value="<?=h(isset($e['end_time'])?substr((string)$e['end_time'],0,5):'')?>"></label><label>Planned Qty<input type="number" min="0" name="planned_qty" value="<?=h($e['planned_qty']??0)?>"></label><?php if(!$isCutProcess):?><label>Actual Qty<input type="number" min="0" name="actual_qty" value="<?=h($e['actual_qty']??0)?>"></label><?php endif;?><?php if(!$isCutProcess):?><label class="wide">Remarks<input name="notes" value="<?=h($e['notes']??'')?>"></label><?php endif;?><div class="wide"><button class="btn btn-primary" id="save_plan_btn" type="submit" disabled><?= $edit ? 'Update Plan' : 'Save Plan' ?></button> <?php if($edit):?><a class="btn btn-ghost" href="?process=<?=h($key)?>&date=<?=h($date)?>">Cancel</a><?php endif;?></div></form></section><div class="process-import-backdrop" id="process-import-modal" hidden><section class="process-import-modal" role="dialog" aria-modal="true" aria-labelledby="process-import-title"><div class="process-import-head"><div><h3 id="process-import-title">Import <?=h($processLabel)?> Data</h3><p>Excel (.xlsx) and CSV (.csv) are supported. Matching Model Code and Production Date records will be updated; new records will be inserted.</p></div><button type="button" class="process-import-close" aria-label="Close">×</button></div><form method="post" enctype="multipart/form-data" class="process-import-form" id="cut-process-import-form"><?=csrf_field()?><input type="hidden" name="action" value="import_cut_process"><input type="hidden" name="process" value="<?=h($key)?>"><input type="hidden" name="plan_date" value="<?=h($date)?>"><label>Select Excel or CSV File<input type="file" name="import_file" accept=".xlsx,.csv" required></label></form><div class="process-import-actions"><button class="btn btn-primary" type="submit" form="cut-process-import-form">Import File</button><a class="btn btn-secondary" href="?process=<?=h($key)?>&amp;date=<?=rawurlencode($date)?>&amp;download_sample=1">Generate Sample Format</a></div></section></div><?php if($importStats): ?><div class="import-result-backdrop" id="import-result-modal"><section class="import-result-modal" role="dialog" aria-modal="true" aria-labelledby="import-result-title"><div class="import-result-head"><div><h3 id="import-result-title"><?= $importErrors ? 'Import Failed — Invalid Format' : 'Import Results' ?></h3><p><?= $importErrors ? 'Nothing was imported or updated.' : ((int)$importStats['inserted'] . ' inserted · ' . (int)$importStats['updated'] . ' updated · ' . (int)$importStats['skipped'] . ' skipped') ?></p></div><button type="button" class="import-result-close" aria-label="Close">×</button></div><?php if($importErrors): ?><div class="import-error-list"><strong>Rows that need attention</strong><ol><?php foreach($importErrors as $importError): ?><li><?=h($importError)?></li><?php endforeach; ?></ol></div><?php else: ?><p class="import-all-good">All rows were imported successfully.</p><?php endif; ?><div class="import-result-actions"><button type="button" class="btn btn-primary import-result-close">Close</button></div></section></div><?php endif; ?><div class="stats-grid stats-grid-csv"><article class="stat-card"><span>Records</span><div class="stat-value"><?=count($rows)?></div></article><article class="stat-card"><span>Planned</span><div class="stat-value"><?=number_format($planned)?></div></article><?php if(!$isCutProcess):?><article class="stat-card"><span>Actual</span><div class="stat-value"><?=number_format($actual)?></div></article><article class="stat-card"><span>Remaining</span><div class="stat-value"><?=number_format(max(0,$planned-$actual))?></div></article><?php endif;?></div><section class="panel data-panel"><div class="panel-head daily-records-head"><h3>Daily records — <?=h($date)?></h3><div class="table-search-wrap"><input type="search" id="daily_records_search" class="table-search-input" placeholder="Search model code, model name, machine..." autocomplete="off" aria-label="Search daily records"><span class="table-search-count" id="daily_records_search_count"><?=count($rows)?> records</span></div></div><div class="table-wrap"><table class="admin-table" id="daily_records_table"><thead><tr><th>Model Code</th><th>Model Name</th><th>Machine</th><th>Shift</th><th>Time</th><th>Planned</th><?php if(!$isCutProcess):?><th>Actual</th><th>Remaining</th><?php endif;?><th>Action</th></tr></thead><tbody><?php foreach($rows as $r):?><tr><td><?=h($r['model_code'])?></td><td><?php if($isCutProcess){$displayPart='';$displayModel='';if(preg_match('/Model:\s*([^|]*)/u',(string)$r['model_name'],$dm))$displayModel=trim($dm[1]);if(preg_match('/PartName:\s*([^|]*)/u',(string)$r['model_name'],$dp))$displayPart=trim($dp[1]);echo h('PartName: '.$displayPart.' | Model: '.$displayModel);}else{echo h($r['model_name']);}?></td><td><?=h($r['machine_no'])?></td><td><?=h($r['shift_name'])?></td><td><?=h(substr((string)$r['start_time'],0,5))?>–<?=h(substr((string)$r['end_time'],0,5))?></td><td><?=number_format((int)$r['planned_qty'])?></td><?php if(!$isCutProcess):?><td><?=number_format((int)$r['actual_qty'])?></td><td><?=number_format(max(0,(int)$r['planned_qty']-(int)$r['actual_qty']))?></td><?php endif;?><td><?php if($isCutProcess):?><?php if($cutKeyColumns):?><button type="button" class="btn btn-secondary btn-small action-icon-btn cut-edit-open" data-row-token="<?=h($r['row_token'])?>" data-machine="<?=h($r['machine_no'])?>" data-shift="<?=h($r['shift_name'])?>" data-start="<?=h(substr((string)$r['start_time'],0,5))?>" data-end="<?=h(substr((string)$r['end_time'],0,5))?>" data-planned="<?=(int)$r['planned_qty']?>" title="Edit" aria-label="Edit"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg></button> <form method="post" style="display:inline" onsubmit="return confirm('Delete this production record?')"><?=csrf_field()?><input type="hidden" name="action" value="delete"><input type="hidden" name="process" value="<?=h($key)?>"><input type="hidden" name="plan_date" value="<?=h($date)?>"><input type="hidden" name="cut_row_token" value="<?=h($r['row_token'])?>"><button class="btn btn-ghost btn-small action-icon-btn delete-action-btn" title="Delete" aria-label="Delete"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/><path d="M10 11v5M14 11v5"/></svg></button></form><?php else:?>—<?php endif;?><?php else:?><a class="btn btn-secondary btn-small action-icon-btn" href="?process=<?=h($key)?>&date=<?=h($date)?>&edit=<?=(int)$r['id']?>" title="Edit" aria-label="Edit"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg></a><form method="post" style="display:inline" onsubmit="return confirm('Delete this plan?')"><?=csrf_field()?><input type="hidden" name="action" value="delete"><input type="hidden" name="process" value="<?=h($key)?>"><input type="hidden" name="plan_date" value="<?=h($date)?>"><input type="hidden" name="id" value="<?=(int)$r['id']?>"><button class="btn btn-ghost btn-small action-icon-btn delete-action-btn" title="Delete" aria-label="Delete"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/><path d="M10 11v5M14 11v5"/></svg></button></form><?php endif;?></td></tr><?php endforeach;?><?php if(!$rows):?><tr><td colspan="<?= $isCutProcess?7:9 ?>">No plan records for this date.</td></tr><?php endif;?></tbody></table></div></section><?php if($isCutProcess && $cutKeyColumns):?><div class="cut-edit-modal-backdrop" id="cut_edit_modal" hidden><section class="cut-edit-modal" role="dialog" aria-modal="true" aria-labelledby="cut_edit_title"><div class="cut-edit-modal-head"><div><h3 id="cut_edit_title">Edit <?=h($processLabel)?> Record</h3><p>Only production details can be changed. Model and Part Name remain locked.</p></div><button type="button" class="cut-edit-close" aria-label="Close">&times;</button></div><form method="post" id="cut_edit_form"><?=csrf_field()?><input type="hidden" name="action" value="edit_cut_details"><input type="hidden" name="process" value="<?=h($key)?>"><input type="hidden" name="plan_date" value="<?=h($date)?>"><input type="hidden" name="cut_row_token" id="cut_edit_row_token"><div class="cut-edit-grid"><label>Machine No.<select name="machine_no" id="cut_edit_machine" required><option value="">Select Machine</option><?php foreach($machines as $machineOption):?><option value="<?=h($machineOption['Machine'])?>"><?=h($machineOption['Machine'])?></option><?php endforeach;?></select></label><label>Shift<select name="shift_name" id="cut_edit_shift" required><option value="">Select</option><option value="Day">Day</option><option value="Night">Night</option></select></label><label>Start Time<input type="time" name="start_time" id="cut_edit_start"></label><label>End Time<input type="time" name="end_time" id="cut_edit_end"></label><label>Planned Qty<input type="number" min="0" step="1" name="planned_qty" id="cut_edit_planned" required></label></div><div class="cut-edit-actions"><button type="submit" class="btn btn-primary">Update Record</button></div></form></section></div><?php endif;?></section><style>
 .action-icon-btn{display:inline-flex!important;align-items:center;justify-content:center;width:36px;height:36px;padding:0!important;vertical-align:middle}.action-icon-btn svg{display:block}.action-icon-btn.delete-action-btn{width:36px;height:36px;padding:0!important;border:1px solid #f0b7bd!important;border-radius:9px!important;background:#fff!important;color:#dc3545!important}.action-icon-btn.delete-action-btn:hover{border-color:#dc3545!important;background:#fff1f2!important;color:#b42335!important}
 .model-duplicate-error{background:#ffe7ec!important;color:#b42335!important;border:1px solid #f3a5b2!important;border-radius:8px;padding:11px 14px;font-weight:700}
 .cut-edit-modal-backdrop{position:fixed;inset:0;z-index:200000;display:flex;align-items:center;justify-content:center;padding:18px;background:rgba(15,25,18,.48)}
@@ -1132,10 +1192,10 @@ $e=$edit??[]; $planned=array_sum(array_map(fn($r)=>(int)$r['planned_qty'],$rows)
  if(!modal)return;
  const form=document.getElementById('cut_edit_form');
  const closeButtons=modal.querySelectorAll('.cut-edit-close');
- const fields={token:document.getElementById('cut_edit_row_token'),machine:document.getElementById('cut_edit_machine'),shift:document.getElementById('cut_edit_shift'),start:document.getElementById('cut_edit_start'),end:document.getElementById('cut_edit_end'),planned:document.getElementById('cut_edit_planned'),actual:document.getElementById('cut_edit_actual')};
+ const fields={token:document.getElementById('cut_edit_row_token'),machine:document.getElementById('cut_edit_machine'),shift:document.getElementById('cut_edit_shift'),start:document.getElementById('cut_edit_start'),end:document.getElementById('cut_edit_end'),planned:document.getElementById('cut_edit_planned')};
  function close(){modal.hidden=true;document.body.style.overflow='';}
  document.querySelectorAll('.cut-edit-open').forEach(button=>button.addEventListener('click',()=>{
-  fields.token.value=button.dataset.rowToken||'';fields.machine.value=button.dataset.machine||'';fields.shift.value=button.dataset.shift||'';fields.start.value=button.dataset.start||'';fields.end.value=button.dataset.end||'';fields.planned.value=button.dataset.planned||'0';fields.actual.value=button.dataset.actual||'0';
+  fields.token.value=button.dataset.rowToken||'';fields.machine.value=button.dataset.machine||'';fields.shift.value=button.dataset.shift||'';fields.start.value=button.dataset.start||'';fields.end.value=button.dataset.end||'';fields.planned.value=button.dataset.planned||'0';
   modal.hidden=false;document.body.style.overflow='hidden';fields.machine.focus();
  }));
  closeButtons.forEach(button=>button.addEventListener('click',close));
@@ -1144,7 +1204,7 @@ $e=$edit??[]; $planned=array_sum(array_map(fn($r)=>(int)$r['planned_qty'],$rows)
  form.addEventListener('submit',event=>{
   if(!fields.machine.value){event.preventDefault();fields.machine.setCustomValidity('Select a Machine No.');fields.machine.reportValidity();return;}fields.machine.setCustomValidity('');
   if(!fields.shift.value){event.preventDefault();fields.shift.setCustomValidity('Select Day or Night.');fields.shift.reportValidity();return;}fields.shift.setCustomValidity('');
-  for(const field of [fields.planned,fields.actual]){if(!field.value.trim()||!/^\d+$/.test(field.value)){event.preventDefault();field.setCustomValidity('Enter a non-negative whole number.');field.reportValidity();return;}field.setCustomValidity('');}
+  for(const field of [fields.planned]){if(!field.value.trim()||!/^\d+$/.test(field.value)){event.preventDefault();field.setCustomValidity('Enter a non-negative whole number.');field.reportValidity();return;}field.setCustomValidity('');}
  });
 })();
 </script><script>
@@ -1368,21 +1428,62 @@ $e=$edit??[]; $planned=array_sum(array_map(fn($r)=>(int)$r['planned_qty'],$rows)
  input.addEventListener('focus',show);
  input.addEventListener('input',show);
  toggle.addEventListener('click',()=>menu.hidden?show():close());
- addBtn.addEventListener('click',()=>{
+ addBtn.addEventListener('click',async()=>{
   const value=addInput.value.trim();
   if(!value){addInput.focus();return;}
-  action.value='add_machine';
-  const form=planForm;
-  let submittedValue=form.querySelector('input[name="new_machine"][type="hidden"]');
-  if(!submittedValue){
-   submittedValue=document.createElement('input');
-   submittedValue.type='hidden';
-   submittedValue.name='new_machine';
-   form.appendChild(submittedValue);
+  addBtn.disabled=true;
+  const originalText=addBtn.textContent;
+  addBtn.textContent='Adding...';
+  try{
+   const payload=new FormData(planForm);
+   payload.set('action','ajax_add_machine');
+   payload.set('new_machine',value);
+   const response=await fetch(window.location.href,{method:'POST',body:payload,headers:{'X-Requested-With':'XMLHttpRequest'}});
+   const result=await response.json();
+   if(!response.ok||!result.success)throw new Error(result.message||'Unable to add machine.');
+   let option=menu.querySelector('.machine-picker-option[data-machine="'+CSS.escape(result.machine)+'"]');
+   if(!option){
+    const row=document.createElement('div');
+    row.className='machine-picker-row';
+    option=document.createElement('button');
+    option.type='button';
+    option.className='machine-picker-option';
+    option.dataset.machine=result.machine;
+    option.textContent=result.machine;
+    option.addEventListener('mousedown',e=>e.preventDefault());
+    option.addEventListener('click',()=>{input.value=result.machine;close();});
+    const del=document.createElement('button');
+    del.type='button';
+    del.className='machine-picker-delete';
+    del.dataset.machineId=result.id;
+    del.dataset.machineName=result.machine;
+    del.setAttribute('aria-label','Delete '+result.machine);
+    del.title='Delete machine';
+    del.textContent='−';
+    del.addEventListener('mousedown',e=>e.preventDefault());
+    del.addEventListener('click',e=>{
+     e.preventDefault();e.stopPropagation();
+     if(!window.confirm('Delete '+result.machine+' from this process?'))return;
+     action.value='delete_machine';deleteId.value=result.id;planForm.noValidate=true;planForm.requestSubmit();
+    });
+    row.append(option,del);
+    menu.querySelector('#machine-picker-list').appendChild(row);
+    options.push(option);
+   }
+   // Keep the plan field at its placeholder; adding a machine does not select it
+   // and does not require a model number or a page reload.
+   input.value='';
+   input.placeholder='Select Machine';
+   addInput.value='';
+   close();
+   if(!result.duplicate)window.alert(result.message);
+   else window.alert(result.message);
+  }catch(err){
+   window.alert(err.message||'Unable to add machine.');
+  }finally{
+   addBtn.disabled=false;
+   addBtn.textContent=originalText;
   }
-  submittedValue.value=value;
-  form.noValidate=true;
-  form.requestSubmit();
  });
  addInput.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();addBtn.click();}});
  document.addEventListener('click',e=>{
@@ -1402,6 +1503,11 @@ $e=$edit??[]; $planned=array_sum(array_map(fn($r)=>(int)$r['planned_qty'],$rows)
  const allowedMachines=new Set(Array.from(document.querySelectorAll('.machine-picker-option[data-machine]')).map(x=>x.dataset.machine).filter(Boolean));
  machine.required=true; shift.required=true;
  form.addEventListener('submit',function(e){
+  // Machine add/delete and record delete/edit actions must bypass plan-field validation.
+  // The machine picker lives outside the form visually, so adding a machine must not
+  // be blocked by the required Machine No. field on the production plan itself.
+  const actionField=form.querySelector('input[name="action"]');
+  if(actionField && actionField.value !== 'save') return;
   if(machine.value.trim()===''){e.preventDefault();machine.setCustomValidity('Please select a Machine No.');machine.reportValidity();machine.focus();return;}
   if(!allowedMachines.has(machine.value.trim())){e.preventDefault();machine.setCustomValidity('Please choose a Machine No. from the registered list.');machine.reportValidity();machine.focus();return;}
   machine.setCustomValidity('');
