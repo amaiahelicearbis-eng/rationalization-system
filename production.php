@@ -718,10 +718,10 @@ if (!$isCutProcess) {
                 <div class="kitting-model-options" id="kitting-model-options" role="listbox" hidden></div>
               </div>
             </label>
-            <label>Day Planned Qty (7:00–19:00)
+            <label>Day Plan (7:00–19:00)
               <input type="number" name="day_qty" id="kitting_day_qty" min="0" step="1" value="<?=h($registerDayQty)?>" placeholder="0">
             </label>
-            <label>Night Planned Qty (19:00–7:00)
+            <label>Night Plan (19:00–7:00)
               <input type="number" name="night_qty" id="kitting_night_qty" min="0" step="1" value="<?=h($registerNightQty)?>" placeholder="0">
             </label>
           </div>
