@@ -18,6 +18,7 @@ return [
     // Only the newest matching CSV in each folder is used; no subfolders are scanned.
     'processes' => [
         'cut' => [$engineeringCnc, $cnc],
+        'cnc_inspection' => [$engineeringCnc, $cnc],
         'kitting' => [$engineeringCnc, $engineeringSub, $cnc, $mirror, $sub, $qc],
         'finished' => [$qc],
         'saki' => $assemblySources,
