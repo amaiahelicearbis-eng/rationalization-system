@@ -1,6 +1,4 @@
 <?php
 // NBC Central managed bridge
 $GLOBALS['nbc_application_key'] = 'rationalization';
-header('Cache-Control: no-store');
-header('Location: ' . '/rationalization-system/login.php', true, 303);
-exit;
+require 'C:/Xampp/htdocs/nbc-central/integrations/bridge.php';

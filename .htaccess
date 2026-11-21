@@ -6,7 +6,7 @@ Options -Indexes
 <IfModule php_module>
     php_value auto_prepend_file "C:/Xampp/htdocs/rationalization-system/central-session.php"
 </IfModule>
-<FilesMatch "^(?:central-session\.php|database\.local\.php|\.user\.ini|\.nbc-central-disabled)$">
+<FilesMatch "^(?:central-session\.php|database\.local\.php|\.user\.ini)$">
     Require all denied
 </FilesMatch>
 # END NBC CENTRAL
