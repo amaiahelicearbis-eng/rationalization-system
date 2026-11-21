@@ -1,5 +1,8 @@
 <?php
 declare(strict_types=1);
+require_once __DIR__ . '/central-auth.php';
+ratSelectStaffSession();
+
 $config = require __DIR__ . '/../config/config.php';
 date_default_timezone_set($config['timezone'] ?? 'Asia/Manila');
 if (session_status() !== PHP_SESSION_ACTIVE) {
@@ -81,7 +84,7 @@ function require_process_access(string $key): void {
             $returnUrl .= '?process=' . rawurlencode($firstAllowed);
         }
         $safeLabel = h($processLabel);
-        $safeReturnUrl = h($returnUrl);
+        $safeReturnUrl = h(ratUrl($returnUrl));
         exit(<<<HTML
 <!DOCTYPE html>
 <html lang="en">
@@ -485,3 +488,5 @@ function save_process_path(string $key, string $path): void {
 }
 
 require_once __DIR__ . '/master-data.php';
+
+ratRefreshStaffSession();

@@ -4,7 +4,8 @@ declare(strict_types=1);
 require __DIR__ . '/includes/bootstrap.php';
 
 if (current_user()) {
-    header('Location: ModelData.php');
+    ratAuthMode('native');
+    header('Location: ' . ratUrl('ModelData.php'));
     exit;
 }
 
@@ -57,9 +58,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$error) {
             'user_process' => (string) ($user['user_process'] ?? ''),
         ];
 
+        ratAuthMode('native');
+
         audit_log('LOGIN', 'user', (int) $user['id'], 'Successful login');
 
-        header('Location: ModelData.php');
+        header('Location: ' . ratUrl('ModelData.php'));
         exit;
     }
 

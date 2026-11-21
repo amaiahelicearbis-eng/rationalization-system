@@ -59,3 +59,7 @@ The CSV source is read-only: this app displays and searches the CSV but does not
 ## Select CSV files from your desktop
 
 On a process page, click **Browse files…** to open the normal Windows file picker. Select a `.csv` file, then click **Upload and use this CSV**. The application validates the CSV header, stores a protected copy under `storage/uploads`, saves that server-side file path in SQL Server, and logs the before/after change in `dbo.change_history`. The file input is limited to CSV files and a 50 MB upload limit. Configure PHP `upload_max_filesize` and `post_max_size` to at least 50M if you need the full limit. If the source file changes later on your desktop, select and upload the updated copy again.
+
+## Optional NBC Central sign-in
+
+See [Central SSO setup and validation](CENTRAL_SSO.md). Direct password login retains its native session; Central maps each active user with their existing role and process assignments.

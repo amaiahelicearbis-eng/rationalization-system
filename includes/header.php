@@ -28,16 +28,16 @@ $showProcesses = in_array($activePage, ['production','modeldata'], true);
 
 </head><body>
 <div class="app-shell"><aside class="sidebar" id="sidebar">
-<a class="brand" href="dashboard.php"><span class="brand-mark">R</span><span><b>RATIONALIZATION</b><small>PRODUCTION SYSTEM</small></span></a>
+<a class="brand" href="dashboard.php?rat_auth=<?=ratAuthContext()?>"><span class="brand-mark">R</span><span><b>RATIONALIZATION</b><small>PRODUCTION SYSTEM</small></span></a>
 <div class="nav-label">WORKSPACE</div><div class="workspace-links">
-<a class="nav-item <?= $activePage==='modeldata'?'active':'' ?>" href="ModelData.php?process=<?=h($currentProcess)?>"><span>▧</span> MASTER DATA</a>
-<a class="nav-item <?= $activePage==='production'?'active':'' ?>" href="production.php?process=<?=h($currentProcess)?>" ><span>⚙</span> Production Planning</a>
-<a class="nav-item <?= $activePage==='history'?'active':'' ?>" href="history.php"><span>◷</span> Change History</a>
-<?php if(is_admin()): ?><a class="nav-item <?= $activePage==='users'?'active':'' ?>" href="users.php"><span>♙</span> User Management</a><?php endif; ?>
+<a class="nav-item <?= $activePage==='modeldata'?'active':'' ?>" href="ModelData.php?rat_auth=<?=ratAuthContext()?>&amp;process=<?=h($currentProcess)?>"><span>▧</span> MASTER DATA</a>
+<a class="nav-item <?= $activePage==='production'?'active':'' ?>" href="production.php?rat_auth=<?=ratAuthContext()?>&amp;process=<?=h($currentProcess)?>" ><span>⚙</span> Production Planning</a>
+<a class="nav-item <?= $activePage==='history'?'active':'' ?>" href="history.php?rat_auth=<?=ratAuthContext()?>"><span>◷</span> Change History</a>
+<?php if(is_admin()): ?><a class="nav-item <?= $activePage==='users'?'active':'' ?>" href="users.php?rat_auth=<?=ratAuthContext()?>"><span>♙</span> User Management</a><?php endif; ?>
 </div>
 <div class="process-links"><div class="nav-label"><?= $activePage === 'modeldata' ? 'MODEL PROCESSES' : 'PLAN PROCESSES' ?></div>
 <?php foreach(accessible_processes() as $k=>$p): ?>
-<a class="nav-item <?= $activePage === ($activePage === 'modeldata' ? 'modeldata' : 'production') && $k === $currentProcess ? 'selected' : '' ?>" href="<?= $activePage === 'modeldata' ? 'ModelData.php' : 'production.php' ?>?process=<?=h($k)?>"><span><?=h($p['icon'])?></span><?=h($p['label'])?></a>
+<a class="nav-item <?= $activePage === ($activePage === 'modeldata' ? 'modeldata' : 'production') && $k === $currentProcess ? 'selected' : '' ?>" href="<?= $activePage === 'modeldata' ? 'ModelData.php' : 'production.php' ?>?rat_auth=<?=ratAuthContext()?>&amp;process=<?=h($k)?>"><span><?=h($p['icon'])?></span><?=h($p['label'])?></a>
 <?php endforeach; ?>
 </div><div class="sidebar-bottom"><span class="status-dot"></span> <?=h(current_user()['full_name'] ?: current_user()['username'])?><small><?=h(current_user()['role'])?></small></div>
-</aside><main class="main"><header class="topbar"><button class="icon-button mobile-menu" id="menuToggle" aria-label="Toggle menu">☰</button><div><div class="eyebrow">RATIONALIZATION / PRODUCTION SYSTEM</div><h1><?=h($pageTitle)?></h1></div><div class="top-actions"><span class="today-pill">● <?=h(date('D, d M Y'))?></span><a class="btn btn-ghost btn-small" href="logout.php">Sign out</a></div></header>
+</aside><main class="main"><header class="topbar"><button class="icon-button mobile-menu" id="menuToggle" aria-label="Toggle menu">☰</button><div><div class="eyebrow">RATIONALIZATION / PRODUCTION SYSTEM</div><h1><?=h($pageTitle)?></h1></div><div class="top-actions"><span class="today-pill">● <?=h(date('D, d M Y'))?></span><a class="btn btn-ghost btn-small" href="logout.php?rat_auth=<?=ratAuthContext()?>">Sign out</a></div></header>

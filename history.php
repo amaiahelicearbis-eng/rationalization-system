@@ -145,7 +145,7 @@ require __DIR__ . '/includes/header.php';
     </div>
 
     <section class="panel data-panel">
-        <form method="get" class="history-filter-bar">
+        <form method="get" class="history-filter-bar"><?=ratAuthField()?>
             <div class="field search-field history-search">
                 <div class="search-wrap">
                     <span>⌕</span>
@@ -161,7 +161,7 @@ require __DIR__ . '/includes/header.php';
                 <?php endforeach; ?>
             </select>
             <button class="btn btn-primary" type="submit">Filter</button>
-            <a class="btn btn-ghost" href="history.php">Clear</a>
+            <a class="btn btn-ghost" href="history.php?rat_auth=<?=ratAuthContext()?>">Clear</a>
         </form>
 
         <div class="table-wrap">
@@ -206,11 +206,11 @@ require __DIR__ . '/includes/header.php';
             <span>Showing <?= count($logs) ?> of <?= number_format($total) ?> events</span>
             <div class="pagination">
                 <?php if ($page > 1): ?>
-                    <a class="btn btn-secondary" href="?q=<?= rawurlencode($q) ?>&action=<?= rawurlencode($action) ?>&page=<?= $page - 1 ?>">← Previous</a>
+                    <a class="btn btn-secondary" href="?rat_auth=<?=ratAuthContext()?>&amp;q=<?= rawurlencode($q) ?>&action=<?= rawurlencode($action) ?>&page=<?= $page - 1 ?>">← Previous</a>
                 <?php endif; ?>
                 <span>Page <?= $page ?> of <?= $pages ?></span>
                 <?php if ($page < $pages): ?>
-                    <a class="btn btn-secondary" href="?q=<?= rawurlencode($q) ?>&action=<?= rawurlencode($action) ?>&page=<?= $page + 1 ?>">Next →</a>
+                    <a class="btn btn-secondary" href="?rat_auth=<?=ratAuthContext()?>&amp;q=<?= rawurlencode($q) ?>&action=<?= rawurlencode($action) ?>&page=<?= $page + 1 ?>">Next →</a>
                 <?php endif; ?>
             </div>
         </div>
